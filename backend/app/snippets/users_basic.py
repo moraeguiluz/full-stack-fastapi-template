@@ -1,4 +1,3 @@
-# backend/app/snippets/users_basic.py
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from typing import List
@@ -7,7 +6,6 @@ import os
 from sqlalchemy import create_engine, String, Integer, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, Session
 
-# ---------------- Config / Lazy init ----------------
 router = APIRouter(prefix="/users", tags=["users"])
 
 _DATABASE_URL = os.getenv("DATABASE_URL")
@@ -20,23 +18,17 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "app_user_basic"
-    __table_args__ = (
-        UniqueConstraint("telefono", name="uq_user_telefono"),
-    )
+    __table_args__ = (UniqueConstraint("telefono", name="uq_user_telefono"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     nombre: Mapped[str] = mapped_column(String(120))
     apellido: Mapped[str] = mapped_column(String(120))
     telefono: Mapped[str] = mapped_column(String(32), index=True)
 
 def _init_db():
-    """Inicializa conexión y tablas solo la primera vez que se pide una sesión."""
     global _engine, _SessionLocal, _inited
-    if _inited:
-        return
-    if not _DATABASE_URL:
-        return  # no rompas el arranque si falta la env
+    if _inited: return
+    if not _DATABASE_URL: return
     url = _DATABASE_URL
-    # Normaliza por si alguien pone postgres://
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+psycopg://", 1)
     _engine = create_engine(url, pool_pre_ping=True)
@@ -54,7 +46,6 @@ def get_db():
     finally:
         db.close()
 
-# ---------------- Schemas ----------------
 class UserCreate(BaseModel):
     nombre: str = Field(min_length=1, max_length=120)
     apellido: str = Field(min_length=1, max_length=120)
@@ -66,27 +57,18 @@ class UserOut(BaseModel):
     apellido: str
     telefono: str
 
-# ---------------- Helpers ----------------
 def _clean_phone(phone: str) -> str:
-    # quita espacios y mantiene + y dígitos
-    p = "".join(ch for ch in phone.strip() if ch.isdigit() or ch == "+")
-    return p
+    return "".join(ch for ch in phone.strip() if ch.isdigit() or ch == "+")
 
-# ---------------- Endpoints ----------------
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def create_user(payload: UserCreate, db: Session = Depends(get_db)):
     tel = _clean_phone(payload.telefono)
-    # Teléfono único
     exists = db.query(User).filter(User.telefono == tel).first()
     if exists:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Teléfono ya registrado")
-    user = User(nombre=payload.nombre.strip(),
-                apellido=payload.apellido.strip(),
-                telefono=tel)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return UserOut(id=user.id, nombre=user.nombre, apellido=user.apellido, telefono=user.telefono)
+        raise HTTPException(status_code=409, detail="Teléfono ya registrado")
+    u = User(nombre=payload.nombre.strip(), apellido=payload.apellido.strip(), telefono=tel)
+    db.add(u); db.commit(); db.refresh(u)
+    return UserOut(id=u.id, nombre=u.nombre, apellido=u.apellido, telefono=u.telefono)
 
 @router.get("", response_model=List[UserOut])
 def list_users(db: Session = Depends(get_db)):
