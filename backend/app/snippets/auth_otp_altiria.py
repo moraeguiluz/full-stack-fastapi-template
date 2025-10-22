@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from typing import Optional
-import os, datetime, random, re, requests, jwt
+import os, datetime as dt, random, re, requests, jwt
 from passlib.context import CryptContext
 
 from sqlalchemy import (
@@ -22,10 +22,10 @@ _EXPIRE_MIN = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))  # 7 días
 _ALT_HTTP_URL = os.getenv("ALTIRIA_HTTP_URL", "https://www.altiria.net:8443/api/http")
 _ALT_KEY = os.getenv("ALTIRIA_API_KEY", "")
 _ALT_SECRET = os.getenv("ALTIRIA_API_SECRET", "")
-_ALT_SENDER = os.getenv("ALTIRIA_SENDER", "")  # opcional
+_ALT_SENDER = os.getenv("ALTIRIA_SENDER", "")
 
-_OTP_TTL = int(os.getenv("OTP_CODE_TTL_SECONDS", "300"))       # 5min
-_OTP_RESEND = int(os.getenv("OTP_RESEND_SECONDS", "60"))       # 60s
+_OTP_TTL = int(os.getenv("OTP_CODE_TTL_SECONDS", "300"))
+_OTP_RESEND = int(os.getenv("OTP_RESEND_SECONDS", "60"))
 
 _engine = None
 _SessionLocal = None
@@ -45,15 +45,15 @@ class User(Base):
     apellido_materno: Mapped[Optional[str]] = mapped_column(String(120), default="")
     telefono: Mapped[str] = mapped_column(String(32), index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class OTP(Base):
     __tablename__ = "app_user_otp"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telefono: Mapped[str] = mapped_column(String(32), index=True)
     code_hash: Mapped[str] = mapped_column(String(255))
-    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True))
-    last_sent_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    last_sent_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 def _init_db():
     global _engine, _SessionLocal, _inited
@@ -80,7 +80,6 @@ def get_db():
 # -------------------- Schemas --------------------
 class SendOtpIn(BaseModel):
     telefono: str = Field(min_length=7, max_length=32)
-    # opcionalmente puedes mandar nombre y apellidos para precrear usuario:
     nombre: Optional[str] = None
     apellido_paterno: Optional[str] = None
     apellido_materno: Optional[str] = None
@@ -102,20 +101,17 @@ class TokenOut(BaseModel):
     token_type: str = "bearer"
 
 # -------------------- Helpers --------------------
-def _now():
-    return datetime.datetime.utcnow()
+def _now() -> dt.datetime:
+    return dt.datetime.utcnow()
 
 def _clean_phone(phone: str) -> str:
-    p = re.sub(r"[^\d+]", "", phone.strip())
-    # asegurar formato internacional (+52..., +34..., etc.). Si no comienza con '+', no lo alteramos aquí.
-    return p
+    return re.sub(r"[^\d+]", "", phone.strip())
 
 def _alt_dest(phone_e164: str) -> str:
-    # Altiria quiere sin '+', ej. +527771234567 -> 527771234567
     return phone_e164.replace("+", "")
 
 def _create_access_token(sub: str) -> str:
-    exp = _now() + datetime.timedelta(minutes=_EXPIRE_MIN)
+    exp = _now() + dt.timedelta(minutes=_EXPIRE_MIN)
     return jwt.encode({"sub": sub, "exp": exp}, _SECRET, algorithm=_ALG)
 
 def _hash_code(code: str) -> str:
@@ -124,29 +120,18 @@ def _hash_code(code: str) -> str:
 def _verify_code(code: str, h: str) -> bool:
     return pwd.verify(code, h)
 
-def _must_wait(last_sent: datetime.datetime) -> bool:
+def _must_wait(last_sent: dt.datetime) -> bool:
     return (_now() - last_sent).total_seconds() < _OTP_RESEND
 
 def _gen_code() -> str:
-    return f"{random.randint(0, 999999):06d}"  # 6 dígitos
+    return f"{random.randint(0, 999999):06d}"
 
 def _send_sms_altiria(dest: str, message: str) -> None:
-    """
-    Llama a la API HTTP de Altiria.
-    Documentación indica POST form-url-encoded a /api/http con apikey / apisecret / senderId / dest / msg (según cuenta).
-    """
     if not (_ALT_KEY and _ALT_SECRET):
         raise HTTPException(500, "Altiria no configurado (ALTIRIA_API_KEY/SECRET)")
-
-    data = {
-        "apikey": _ALT_KEY,
-        "apisecret": _ALT_SECRET,
-        "dest": dest,
-        "msg": message,
-    }
+    data = {"apikey": _ALT_KEY, "apisecret": _ALT_SECRET, "dest": dest, "msg": message}
     if _ALT_SENDER:
         data["senderId"] = _ALT_SENDER
-
     headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}
     try:
         r = requests.post(_ALT_HTTP_URL, data=data, headers=headers, timeout=20)
@@ -160,22 +145,15 @@ def _send_sms_altiria(dest: str, message: str) -> None:
 def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
     tel = _clean_phone(payload.telefono)
     if not tel.startswith("+"):
-        # puedes forzar +52 para MX si lo prefieres:
-        # tel = "+52" + tel
         raise HTTPException(400, "El teléfono debe venir en formato internacional, ej. +527771234567")
-
-    # throttle por último envío
     otp = db.query(OTP).filter(OTP.telefono == tel).order_by(OTP.id.desc()).first()
     if otp and _must_wait(otp.last_sent_at):
         segundos = int(_OTP_RESEND - (_now() - otp.last_sent_at).total_seconds())
         raise HTTPException(429, f"Espera {max(segundos,1)}s para reenviar el código")
-
     code = _gen_code()
     msg = f"Tu código Bonube es {code}. Expira en {_OTP_TTL//60} min."
     _send_sms_altiria(_alt_dest(tel), msg)
-
-    # guarda/actualiza OTP
-    expires = _now() + datetime.timedelta(seconds=_OTP_TTL)
+    expires = _now() + dt.timedelta(seconds=_OTP_TTL)
     if not otp:
         otp = OTP(telefono=tel, code_hash=_hash_code(code), expires_at=expires, last_sent_at=_now())
         db.add(otp)
@@ -184,8 +162,6 @@ def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
         otp.expires_at = expires
         otp.last_sent_at = _now()
     db.commit()
-
-    # precrea usuario (si quieres guardar nombre/apellidos de una vez)
     u = db.query(User).filter(User.telefono == tel).first()
     if not u:
         u = User(
@@ -196,7 +172,6 @@ def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
             is_active=True,
         )
         db.add(u); db.commit()
-
     return {"ok": True, "sent": True}
 
 @router.post("/verify-otp", response_model=TokenOut)
@@ -209,23 +184,15 @@ def verify_otp(payload: VerifyOtpIn, db: Session = Depends(get_db)):
         raise HTTPException(400, "Código expirado")
     if not _verify_code(payload.code, otp.code_hash):
         raise HTTPException(401, "Código incorrecto")
-
-    # asegura usuario
     u = db.query(User).filter(User.telefono == tel).first()
     if not u:
         u = User(telefono=tel, is_active=True)
         db.add(u); db.commit(); db.refresh(u)
-
     token = _create_access_token(sub=str(u.id))
     return TokenOut(access_token=token)
 
 @router.get("/me", response_model=UserOut)
-def me(current=Depends(lambda token=Depends(oauth2), db=Depends(get_db): _current_user(token, db))):
-    # wrapper inline para no duplicar código; _current_user usa decode y consulta
-    return _current_user_detail
-
-# helper real para /me (separado por claridad)
-def _current_user(token: str, db: Session) -> UserOut:
+def me(token: str = Depends(oauth2), db: Session = Depends(get_db)):
     try:
         uid = jwt.decode(token, _SECRET, algorithms=[_ALG]).get("sub")
     except jwt.PyJWTError:
@@ -233,10 +200,8 @@ def _current_user(token: str, db: Session) -> UserOut:
     u = db.query(User).filter(User.id == int(uid)).first()
     if not u or not u.is_active:
         raise HTTPException(401, "Usuario no encontrado o inactivo")
-    global _current_user_detail
-    _current_user_detail = UserOut(
+    return UserOut(
         id=u.id, telefono=u.telefono, nombre=u.nombre,
         apellido_paterno=u.apellido_paterno, apellido_materno=u.apellido_materno,
         is_active=u.is_active
     )
-    return _current_user_detail
