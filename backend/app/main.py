@@ -1,27 +1,16 @@
-# backend/app/main.py
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
-import importlib, pkgutil
+from .snippets import hello
 
-app = FastAPI(
-    title="API Bonube",
-    openapi_url="/api/v1/openapi.json",  # Swagger para rutas bajo /api/v1
-    docs_url="/docs",
-    redoc_url="/redoc",
-)
+app = FastAPI(title="API Bonube", openapi_url="/api/v1/openapi.json", docs_url="/docs", redoc_url="/redoc")
 
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse(url="/docs")  # o devuelve {"ok": True}
+    return RedirectResponse(url="/docs")
 
 @app.get("/health", include_in_schema=False)
 def health():
     return {"ok": True}
 
-# --- Autoload de "snippets" (app/snippets/*.py que expongan 'router') ---
-from . import snippets as _snippets_pkg  # carpeta backend/app/snippets
-
-for m in pkgutil.iter_modules(_snippets_pkg.__path__):
-    mod = importlib.import_module(f"{_snippets_pkg.__name__}.{m.name}")
-    if hasattr(mod, "router"):  # opcional: getattr(mod, "ENABLED", True) and ...
-        app.include_router(mod.router, prefix="/api/v1")
+# monta el snippet bajo /api/v1
+app.include_router(hello.router, prefix="/api/v1")
