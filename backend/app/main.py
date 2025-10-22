@@ -1,13 +1,13 @@
 # backend/app/main.py
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
-import os, traceback
-from sqlalchemy import create_engine, text
+import logging
+import importlib
+import pkgutil
 
-# --- FastAPI app ---
 app = FastAPI(
     title="API Bonube",
-    openapi_url="/api/v1/openapi.json",
+    openapi_url="/api/v1/openapi.json",  # útil si montas tus rutas bajo /api/v1
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -20,27 +20,32 @@ def root():
 def health():
     return {"ok": True}
 
-# --- Tu router de diagnóstico DB ---
-router = APIRouter(prefix="/db", tags=["debug-db"])
+# -------------------------------------------------------------------
+# Autoload de snippets: carga todo módulo en app/snippets/*.py que
+# exponga `router = APIRouter(...)` y lo monta bajo /api/v1
+# -------------------------------------------------------------------
+_loaded, _failed = [], []
 
-@router.get("/ping")
-def db_ping():
-    url = os.getenv("DATABASE_URL", "")
-    if not url:
-        return {"ok": False, "why": "DATABASE_URL missing"}
-    info = {"driver": url.split("://", 1)[0]}
-    try:
-        engine = create_engine(url, pool_pre_ping=True)
-        with engine.connect() as conn:
-            row = conn.execute(text("select 1")).scalar()
-        return {"ok": True, "select1": row, **info}
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": str(e),
-            "trace": traceback.format_exc().splitlines()[-1],
-            **info,
-        }
+try:
+    from . import snippets as _snippets_pkg  # requiere backend/app/snippets/__init__.py
+    for m in pkgutil.iter_modules(_snippets_pkg.__path__):
+        modname = f"{_snippets_pkg.__name__}.{m.name}"
+        try:
+            mod = importlib.import_module(modname)
+            if getattr(mod, "ENABLED", True) and hasattr(mod, "router"):
+                app.include_router(mod.router, prefix="/api/v1")
+                _loaded.append(m.name)
+            else:
+                _failed.append((m.name, "sin 'router' o deshabilitado"))
+        except Exception as e:
+            _failed.append((m.name, f"import error: {e}"))
+except Exception as e:
+    _failed.append(("__snippets__", f"package error: {e}"))
 
-# Monta el router bajo /api/v1
-app.include_router(router, prefix="/api/v1")
+log = logging.getLogger("uvicorn")
+if _loaded:
+    log.info(f"Snippets cargados: {', '.join(_loaded)}")
+if _failed:
+    for name, reason in _failed:
+        log.warning(f"Snippet omitido: {name} → {reason}")
+# -------------------------------------------------------------------
