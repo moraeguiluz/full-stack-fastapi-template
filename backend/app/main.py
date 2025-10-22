@@ -1,34 +1,25 @@
-# backend/app/main.py
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
-import importlib, pkgutil, logging
+from fastapi import APIRouter
+import os, traceback
+from sqlalchemy import create_engine, text
 
-app = FastAPI(
-    title="API Bonube",
-    openapi_url="/api/v1/openapi.json",
-    docs_url="/docs",
-    redoc_url="/redoc",
-)
+router = APIRouter(prefix="/db", tags=["debug-db"])
 
-@app.get("/", include_in_schema=False)
-def root():
-    # O devuelve {"ok": True, "hint": "Visita /docs"}
-    return RedirectResponse(url="/docs")
-
-@app.get("/health", include_in_schema=False)
-def health():
-    return {"ok": True}
-
-# -------- Autocarga de "snippets" (app/snippets/*.py) --------
-from . import snippets as _snippets_pkg  # carpeta backend/app/snippets
-
-_loaded = []
-for m in pkgutil.iter_modules(_snippets_pkg.__path__):
-    mod = importlib.import_module(f"{_snippets_pkg.__name__}.{m.name}")
-    # Solo módulos que expongan "router" (APIRouter)
-    if getattr(mod, "ENABLED", True) and hasattr(mod, "router"):
-        app.include_router(mod.router, prefix="/api/v1")
-        _loaded.append(m.name)
-
-logging.getLogger("uvicorn").info(f"Snippets cargados: {', '.join(_loaded) or '(ninguno)'}")
-# --------------------------------------------------------------
+@router.get("/ping")
+def db_ping():
+    url = os.getenv("DATABASE_URL", "")
+    if not url:
+        return {"ok": False, "why": "DATABASE_URL missing"}
+    info = {"driver": url.split("://", 1)[0]}
+    try:
+        # Intento de conexión
+        engine = create_engine(url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            row = conn.execute(text("select 1")).scalar()
+        return {"ok": True, "select1": row, **info}
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "trace": traceback.format_exc().splitlines()[-1],
+            **info
+        }
