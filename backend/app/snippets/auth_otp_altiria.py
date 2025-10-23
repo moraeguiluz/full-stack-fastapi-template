@@ -18,25 +18,27 @@ router = APIRouter(prefix="/auth", tags=["auth-otp"])
 _DB_URL = os.getenv("DATABASE_URL")
 _SECRET = os.getenv("SECRET_KEY", "dev-change-me")
 _ALG = "HS256"
-EXPIRE_MIN = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))   # 7 días sesión
-OTP_TOKEN_TTL = int(os.getenv("OTP_VERIFY_TOKEN_TTL", "600"))          # 10 min para finalizar
 
-ALT_MODE = os.getenv("ALTIRIA_MODE", "http").lower()                   # http | rest
+EXPIRE_MIN = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))     # JWT de sesión (min)
+OTP_TOKEN_TTL = int(os.getenv("OTP_VERIFY_TOKEN_TTL", "600"))           # minitoken tras verify-otp (seg)
+
+ALT_MODE = os.getenv("ALTIRIA_MODE", "http").lower()                    # http | rest
 ALT_HTTP_URL = os.getenv("ALTIRIA_HTTP_URL", "https://www.altiria.net:8443/api/http")
 ALT_REST_URL = os.getenv("ALTIRIA_REST_URL", "https://www.altiria.net:8443/apirest/ws")
 ALT_KEY = os.getenv("ALTIRIA_API_KEY", "")
 ALT_SECRET = os.getenv("ALTIRIA_API_SECRET", "")
-ALT_SENDER = os.getenv("ALTIRIA_SENDER", "")                           # opcional
-ALT_DRY = os.getenv("ALTIRIA_DRY_RUN", "false").lower() == "true"
-ALT_DEBUG = os.getenv("ALTIRIA_DEBUG", "false").lower() == "true"
+ALT_SENDER = os.getenv("ALTIRIA_SENDER", "")                            # opcional
+ALT_DRY = os.getenv("ALTIRIA_DRY_RUN", "false").lower() == "true"       # pruebas sin enviar SMS
+ALT_DEBUG = os.getenv("ALTIRIA_DEBUG", "false").lower() == "true"       # devuelve body/status del proveedor
 
-OTP_TTL = int(os.getenv("OTP_CODE_TTL_SECONDS", "300"))
-OTP_RESEND = int(os.getenv("OTP_RESEND_SECONDS", "60"))
+OTP_TTL = int(os.getenv("OTP_CODE_TTL_SECONDS", "300"))                 # caducidad OTP (seg)
+OTP_RESEND = int(os.getenv("OTP_RESEND_SECONDS", "60"))                 # throttle reenvío (seg)
 
 _engine = None
 _SessionLocal = None
 _inited = False
-# pbkdf2: sin límite de 72 bytes, perfecto para OTP
+
+# pbkdf2: sin límite 72 bytes (mejor para OTP que bcrypt)
 pwd = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/finalize")
 
@@ -50,7 +52,7 @@ class User(Base):
     nombre: Mapped[Optional[str]] = mapped_column(String(120), default="")
     apellido_paterno: Mapped[Optional[str]] = mapped_column(String(120), default="")
     apellido_materno: Mapped[Optional[str]] = mapped_column(String(120), default="")
-    # NULL para poder “liberar” el número al crear cuenta nueva
+    # NULL para poder “liberar” el número si el usuario crea cuenta nueva
     telefono: Mapped[Optional[str]] = mapped_column(String(32), index=True, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -64,8 +66,10 @@ class OTP(Base):
     last_sent_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 def _init_db():
+    """Inicializa conexión y tablas al primer uso; no rompe el arranque si falta la env."""
     global _engine, _SessionLocal, _inited
-    if _inited or not _DB_URL: return
+    if _inited or not _DB_URL:
+        return
     url = _DB_URL
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+psycopg://", 1)
@@ -79,8 +83,10 @@ def get_db():
     if not _SessionLocal:
         raise HTTPException(status_code=503, detail="DB no configurada (falta DATABASE_URL)")
     db: Session = _SessionLocal()
-    try: yield db
-    finally: db.close()
+    try:
+        yield db
+    finally:
+        db.close()
 
 # -------------------- Schemas --------------------
 class SendOtpIn(BaseModel):
@@ -90,11 +96,18 @@ class VerifyOtpIn(BaseModel):
     telefono: str
     code: str = Field(min_length=4, max_length=8)
 
+class UserPreview(BaseModel):
+    id: int
+    nombre: Optional[str] = ""
+    apellido_paterno: Optional[str] = ""
+    apellido_materno: Optional[str] = ""
+    telefono: Optional[str] = None
+
 class VerifyOtpOut(BaseModel):
     verified: bool
     otp_token: str
     exists: bool
-    preview: Optional["UserPreview"] = None
+    preview: Optional[UserPreview] = None
 
 class FinalizeIn(BaseModel):
     otp_token: str
@@ -102,13 +115,6 @@ class FinalizeIn(BaseModel):
     nombre: Optional[str] = None
     apellido_paterno: Optional[str] = None
     apellido_materno: Optional[str] = None
-
-class UserPreview(BaseModel):
-    id: int
-    nombre: Optional[str] = ""
-    apellido_paterno: Optional[str] = ""
-    apellido_materno: Optional[str] = ""
-    telefono: Optional[str] = None
 
 class UserOut(BaseModel):
     id: int
@@ -122,29 +128,46 @@ class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
-VerifyOtpOut.model_rebuild()
+class FinalizeOut(TokenOut):
+    pass
 
 # -------------------- Helpers --------------------
-def _now() -> dt.datetime: return dt.datetime.utcnow()
-def _clean_phone(phone: str) -> str: return re.sub(r"[^\d+]", "", phone.strip())
-def _alt_dest(phone_e164: str) -> str: return phone_e164.replace("+", "")
+def _now() -> dt.datetime:
+    # consciente de zona (UTC) para evitar naive/aware mix
+    return dt.datetime.now(dt.timezone.utc)
+
+def _normalize_aware(ts: dt.datetime) -> dt.datetime:
+    # asegura tz-aware (UTC)
+    return ts.replace(tzinfo=dt.timezone.utc) if ts.tzinfo is None else ts.astimezone(dt.timezone.utc)
+
+def _clean_phone(phone: str) -> str:
+    # Mantén solo + y dígitos
+    return re.sub(r"[^\d+]", "", phone.strip())
+
+def _alt_dest(phone_e164: str) -> str:
+    # Altiria quiere sin '+'
+    return phone_e164.replace("+", "")
+
 def _jwt(payload: dict, minutes: int) -> str:
     exp = _now() + dt.timedelta(minutes=minutes)
     data = {**payload, "exp": exp}
     return jwt.encode(data, _SECRET, algorithm=_ALG)
+
 def _decode(token: str) -> dict:
     return jwt.decode(token, _SECRET, algorithms=[_ALG])
 
 def _call_altiria_http(dest: str, message: str):
     data = {"apikey": ALT_KEY, "apisecret": ALT_SECRET, "dest": dest, "msg": message}
-    if ALT_SENDER: data["senderId"] = ALT_SENDER
+    if ALT_SENDER:
+        data["senderId"] = ALT_SENDER
     headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}
     return requests.post(ALT_HTTP_URL, data=data, headers=headers, timeout=20)
 
 def _call_altiria_rest(dest: str, message: str):
     url = ALT_REST_URL.rstrip("/") + "/sendSms"
     payload = {"apikey": ALT_KEY, "apisecret": ALT_SECRET, "destination": dest, "message": message}
-    if ALT_SENDER: payload["senderId"] = ALT_SENDER
+    if ALT_SENDER:
+        payload["senderId"] = ALT_SENDER
     return requests.post(url, json=payload, timeout=20)
 
 def _send_sms_altiria(dest: str, message: str) -> dict:
@@ -167,10 +190,14 @@ def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
     if not tel.startswith("+"):
         raise HTTPException(400, "El teléfono debe venir en formato internacional, ej. +527771234567")
 
+    # throttle (normaliza aware)
     otp = db.query(OTP).filter(OTP.telefono == tel).order_by(OTP.id.desc()).first()
-    if otp and (_now() - otp.last_sent_at).total_seconds() < OTP_RESEND:
-        secs = int(OTP_RESEND - (_now() - otp.last_sent_at).total_seconds())
-        raise HTTPException(429, f"Espera {max(secs,1)}s para reenviar el código")
+    if otp:
+        last = _normalize_aware(otp.last_sent_at)
+        delta = (_now() - last).total_seconds()
+        if delta < OTP_RESEND:
+            secs = int(OTP_RESEND - delta)
+            raise HTTPException(429, f"Espera {max(secs,1)}s para reenviar el código")
 
     code = f"{random.randint(0, 999999):06d}"
     msg = f"Tu código Bonube es {code}. Expira en {OTP_TTL//60} min."
@@ -188,10 +215,11 @@ def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
 
     u = db.query(User).filter(User.telefono == tel).first()
     exists = bool(u)
-    preview = UserPreview(
-        id=u.id, telefono=u.telefono, nombre=u.nombre,
-        apellido_paterno=u.apellido_paterno, apellido_materno=u.apellido_materno
-    ) if exists else None
+    preview = (
+        {"id": u.id, "telefono": u.telefono, "nombre": u.nombre,
+         "apellido_paterno": u.apellido_paterno, "apellido_materno": u.apellido_materno}
+        if exists else None
+    )
 
     resp = {"ok": True, "sent": True, "exists": exists, "preview": preview}
     if ALT_DRY or ALT_DEBUG:
@@ -200,24 +228,27 @@ def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
             resp["test_code"] = code
     return resp
 
-class VerifyOtpIn(BaseModel):
-    telefono: str
-    code: str = Field(min_length=4, max_length=8)
-
 @router.post("/verify-otp", response_model=VerifyOtpOut)
 def verify_otp(payload: VerifyOtpIn, db: Session = Depends(get_db)):
     tel = _clean_phone(payload.telefono)
     otp = db.query(OTP).filter(OTP.telefono == tel).order_by(OTP.id.desc()).first()
-    if not otp: raise HTTPException(400, "Solicita primero el código")
-    if _now() > otp.expires_at: raise HTTPException(400, "Código expirado")
-    if not pwd.verify(payload.code, otp.code_hash): raise HTTPException(401, "Código incorrecto")
+    if not otp:
+        raise HTTPException(400, "Solicita primero el código")
+
+    exp = _normalize_aware(otp.expires_at)
+    if _now() > exp:
+        raise HTTPException(400, "Código expirado")
+
+    if not pwd.verify(payload.code, otp.code_hash):
+        raise HTTPException(401, "Código incorrecto")
 
     u = db.query(User).filter(User.telefono == tel).first()
     otp_token = _jwt({"otp_phone": tel}, minutes=max(OTP_TOKEN_TTL // 60, 1))
-    preview = UserPreview(
-        id=u.id, telefono=u.telefono, nombre=u.nombre,
-        apellido_paterno=u.apellido_paterno, apellido_materno=u.apellido_materno
-    ) if u else None
+    preview = (
+        {"id": u.id, "telefono": u.telefono, "nombre": u.nombre,
+         "apellido_paterno": u.apellido_paterno, "apellido_materno": u.apellido_materno}
+        if u else None
+    )
     return VerifyOtpOut(verified=True, otp_token=otp_token, exists=bool(u), preview=preview)
 
 class FinalizeIn(BaseModel):
@@ -245,12 +276,13 @@ def finalize(payload: FinalizeIn, db: Session = Depends(get_db)):
     u = db.query(User).filter(User.telefono == tel).first()
 
     if payload.action == "use_existing":
-        if not u: raise HTTPException(404, "No existe cuenta con ese teléfono (usa 'new_account')")
+        if not u:
+            raise HTTPException(404, "No existe cuenta con ese teléfono (usa 'new_account')")
         token = _jwt({"sub": str(u.id)}, minutes=EXPIRE_MIN)
-        return FinalizeOut(access_token=token)
+        return FinalizeOut(access_token=token, token_type="bearer")
 
     if payload.action == "new_account":
-        # liberar teléfono de cuenta previa si existe
+        # liberar teléfono de la cuenta previa (si hay)
         if u:
             try:
                 u.telefono = None
@@ -259,6 +291,7 @@ def finalize(payload: FinalizeIn, db: Session = Depends(get_db)):
                 db.rollback()
                 raise HTTPException(409, "No se pudo liberar el teléfono de la cuenta previa. "
                                           "Verifica restricciones en app_user_auth.telefono.")
+        # crear nueva cuenta con el teléfono
         new_user = User(
             telefono=tel,
             nombre=(payload.nombre or "").strip(),
@@ -268,17 +301,9 @@ def finalize(payload: FinalizeIn, db: Session = Depends(get_db)):
         )
         db.add(new_user); db.commit(); db.refresh(new_user)
         token = _jwt({"sub": str(new_user.id)}, minutes=EXPIRE_MIN)
-        return FinalizeOut(access_token=token)
+        return FinalizeOut(access_token=token, token_type="bearer")
 
     raise HTTPException(400, "action inválida (usa use_existing | new_account)")
-
-class UserOut(BaseModel):
-    id: int
-    telefono: Optional[str] = None
-    nombre: Optional[str] = ""
-    apellido_paterno: Optional[str] = ""
-    apellido_materno: Optional[str] = ""
-    is_active: bool
 
 @router.get("/me", response_model=UserOut)
 def me(token: str = Depends(oauth2), db: Session = Depends(get_db)):
