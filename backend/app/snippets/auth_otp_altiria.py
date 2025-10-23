@@ -177,11 +177,7 @@ def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
             id=u.id, telefono=u.telefono,
             nombre=u.nombre, apellido_paterno=u.apellido_paterno, apellido_materno=u.apellido_materno
         )
-        resp = {"ok": True, "sent": True, "exists": exists, "preview": preview}
-if ALT_DRY or os.getenv("ALTIRIA_DEBUG","false").lower() == "true":
-    resp["altiria"] = send_info  # status, body (primeros 400 chars)
-    if ALT_DRY: resp["test_code"] = code
-return resp
+        
     return {"ok": True, "sent": True, "exists": exists, "preview": preview}
 
 @router.post("/verify-otp", response_model=VerifyOtpOut)
