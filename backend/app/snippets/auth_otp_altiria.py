@@ -31,7 +31,7 @@ OTP_RESEND = int(os.getenv("OTP_RESEND_SECONDS", "60"))
 _engine = None
 _SessionLocal = None
 _inited = False
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/finalize")
 
 class Base(DeclarativeBase):
