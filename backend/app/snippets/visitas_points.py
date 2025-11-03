@@ -1,6 +1,4 @@
-# backend/app/snippets/visitas.py ya crea la tabla.
-# Este snippet solo LEE puntos y devuelve GeoJSON para el mapa.
-
+# backend/app/snippets/visitas_points.py
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
@@ -57,7 +55,7 @@ async def _current_user_id(token: str = Depends(oauth2)) -> int:
     except jwt.PyJWTError:
         raise HTTPException(401, "Token inválido")
     if not uid:
-        raise HTTPException(401, "Usuario no autenticado")
+        return 0
     return uid
 
 def _ensure_tz(ts: Optional[dt.datetime]) -> Optional[dt.datetime]:
@@ -67,16 +65,16 @@ def _ensure_tz(ts: Optional[dt.datetime]) -> Optional[dt.datetime]:
 
 # -------------------- Schemas (GeoJSON) --------------------
 class GeoPoint(BaseModel):
-    type: str = "Point"
+    type: Literal["Point"] = "Point"
     coordinates: List[float]  # [lng, lat]
 
 class Feature(BaseModel):
-    type: str = "Feature"
+    type: Literal["Feature"] = "Feature"
     geometry: GeoPoint
     properties: Dict[str, Any] = Field(default_factory=dict)
 
 class FeatureCollection(BaseModel):
-    type: str = "FeatureCollection"
+    type: Literal["FeatureCollection"] = "FeatureCollection"
     features: List[Feature]
 
 # -------------------- GET /api/v1/visitas/points --------------------
@@ -92,6 +90,9 @@ def listar_puntos(
     Devuelve TODAS las visitas del usuario autenticado con lat/lng en GeoJSON.
     properties incluye: id, user_id, nombre, apellidos, telefono, hora (ISO 8601 UTC), created_at.
     """
+    if not uid:
+        raise HTTPException(401, "Usuario no autenticado")
+
     from_dt = _ensure_tz(from_dt)
     to_dt = _ensure_tz(to_dt)
 
@@ -133,9 +134,9 @@ def listar_puntos(
             "apellido_materno": r.get("apellido_materno") or "",
             "telefono": r.get("telefono"),
             "hora": r["hora"].astimezone(dt.timezone.utc).isoformat()
-                    if isinstance(r["hora"], dt.datetime) else str(r["hora"]),
+                if isinstance(r["hora"], dt.datetime) else str(r["hora"]),
             "created_at": r["created_at"].astimezone(dt.timezone.utc).isoformat()
-                          if isinstance(r["created_at"], dt.datetime) else str(r["created_at"]),
+                if isinstance(r["created_at"], dt.datetime) else str(r["created_at"]),
         }
 
         features.append(
@@ -145,7 +146,4 @@ def listar_puntos(
             )
         )
 
-    return FeatureCollection(
-        type="text/plain",  # pydantic ignores this; response_model enforces "FeatureCollection"
-        features=features
-    )
+    return FeatureCollection(features=features)
