@@ -1,8 +1,11 @@
-# backend/app/snippets/visitas_points.py
+# backend/app/snippets/visitas.py ya crea la tabla.
+# Este snippet solo LEE puntos y devuelve GeoJSON para el mapa.
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any
+from typing import Literal
 import os, datetime as dt, jwt
 
 from sqlalchemy import create_engine, text
@@ -64,16 +67,16 @@ def _ensure_tz(ts: Optional[dt.datetime]) -> Optional[dt.datetime]:
 
 # -------------------- Schemas (GeoJSON) --------------------
 class GeoPoint(BaseModel):
-    type: Literal["Point"] = "Point"
+    type: str = "Point"
     coordinates: List[float]  # [lng, lat]
 
 class Feature(BaseModel):
-    type: Liter al["Feature"] = "Feature"
+    type: str = "Feature"
     geometry: GeoPoint
     properties: Dict[str, Any] = Field(default_factory=dict)
 
 class FeatureCollection(BaseModel):
-    type: Literal["FeatureCollection"] = "FeatureCollection"
+    type: str = "FeatureCollection"
     features: List[Feature]
 
 # -------------------- GET /api/v1/visitas/points --------------------
@@ -143,6 +146,6 @@ def listar_puntos(
         )
 
     return FeatureCollection(
-        type="FeatureCollection",
+        type="text/plain",  # pydantic ignores this; response_model enforces "FeatureCollection"
         features=features
     )
