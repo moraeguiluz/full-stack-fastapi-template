@@ -9,7 +9,8 @@ import os, datetime as dt, jwt
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
-router = APIRouter(prefix="/visitas", tags=["visitas"])
+# Prefijo separado para evitar choques con /visitas/{visita_id}
+router = APIRouter(prefix="/visitas/geo", tags=["visitas-geo"])
 
 # -------------------- Config & lazy init --------------------
 _DB_URL = os.getenv("DATABASE_URL")
@@ -55,7 +56,7 @@ async def _current_user_id(token: str = Depends(oauth2)) -> int:
     except jwt.PyJWTError:
         raise HTTPException(401, "Token inválido")
     if not uid:
-        return 0
+        raise HTTPException(401, "Usuario no autenticado")
     return uid
 
 def _ensure_tz(ts: Optional[dt.datetime]) -> Optional[dt.datetime]:
@@ -77,7 +78,7 @@ class FeatureCollection(BaseModel):
     type: Literal["FeatureCollection"] = "FeatureCollection"
     features: List[Feature]
 
-# -------------------- GET /api/v1/visitas/points --------------------
+# -------------------- GET /api/v1/visitas/geo/points --------------------
 @router.get("/points", response_model=FeatureCollection)
 def listar_puntos(
     db: Session = Depends(get_db),
@@ -88,11 +89,8 @@ def listar_puntos(
 ):
     """
     Devuelve TODAS las visitas del usuario autenticado con lat/lng en GeoJSON.
-    properties incluye: id, user_id, nombre, apellidos, telefono, hora (ISO 8601 UTC), created_at.
+    properties: id, user_id, nombre, apellidos, telefono, hora (ISO 8601 UTC), created_at.
     """
-    if not uid:
-        raise HTTPException(401, "Usuario no autenticado")
-
     from_dt = _ensure_tz(from_dt)
     to_dt = _ensure_tz(to_dt)
 
