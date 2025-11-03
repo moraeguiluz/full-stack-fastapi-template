@@ -22,7 +22,7 @@ _inited = False
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/finalize")
 
 def _init_db():
-    """Inicializa conexión al primer uso (no crea tablas)."""
+    """Inicializa conexión al primer uso; no crea tablas nuevas aquí."""
     global _engine, _SessionLocal, _inited
     if _inited or not _DB_URL:
         return
@@ -43,9 +43,6 @@ def get_db():
     finally:
         db.close()
 
-def _now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
-
 def _decode(token: str) -> dict:
     return jwt.decode(token, _SECRET, algorithms=[_ALG])
 
@@ -65,13 +62,13 @@ def _ensure_tz(ts: Optional[dt.datetime]) -> Optional[dt.datetime]:
         return None
     return ts if ts.tzinfo else ts.replace(tzinfo=dt.timezone.utc)
 
-# -------------------- Schemas --------------------
+# -------------------- Schemas (GeoJSON) --------------------
 class GeoPoint(BaseModel):
     type: Literal["Point"] = "Point"
     coordinates: List[float]  # [lng, lat]
 
 class Feature(BaseModel):
-    type: Literal["Feature"] = "Feature"
+    type: Liter al["Feature"] = "Feature"
     geometry: GeoPoint
     properties: Dict[str, Any] = Field(default_factory=dict)
 
@@ -79,18 +76,18 @@ class FeatureCollection(BaseModel):
     type: Literal["FeatureCollection"] = "FeatureCollection"
     features: List[Feature]
 
-# -------------------- Endpoint: puntos GeoJSON --------------------
+# -------------------- GET /api/v1/visitas/points --------------------
 @router.get("/points", response_model=FeatureCollection)
 def listar_puntos(
     db: Session = Depends(get_db),
     uid: int = Depends(_current_user_id),
-    limit: int = Query(10000, ge=1, le=50000, description="Límite de features a devolver"),
+    limit: int = Query(10000, ge=1, le=50000, description="Máximo de puntos a devolver"),
     from_dt: Optional[dt.datetime] = Query(None, alias="from"),
     to_dt: Optional[dt.datetime] = Query(None, alias="to"),
 ):
     """
-    Devuelve **todas** las visitas del usuario autenticado con lat/lng,
-    en formato GeoJSON FeatureCollection. `hora` se serializa como ISO 8601 UTC.
+    Devuelve TODAS las visitas del usuario autenticado con lat/lng en GeoJSON.
+    properties incluye: id, user_id, nombre, apellidos, telefono, hora (ISO 8601 UTC), created_at.
     """
     from_dt = _ensure_tz(from_dt)
     to_dt = _ensure_tz(to_dt)
@@ -121,9 +118,10 @@ def listar_puntos(
     features: List[Feature] = []
     for r in rows:
         lat = r["lat"]
-        lng = r "lng"
+        lng = r["lng"]
         if lat is None or lng is None:
             continue
+
         props = {
             "id": r["id"],
             "user_id": r["user_id"],
@@ -131,12 +129,20 @@ def listar_puntos(
             "apellido_paterno": r.get("apellido_paterno") or "",
             "apellido_materno": r.get("apellido_materno") or "",
             "telefono": r.get("telefono"),
-            "hora": (r["hora"].astimezone(dt.timezone.utc).iso8601()
-                     if isinstance(r["hora"], dt.datetime) else str(r["hora"])),
-            "created_at": (r["created_at"].astimezone(dt.timezone.utc).isoformat()
-                           if isinstance(r["created_at"], dt.datetime) else str(r["created_at"])),
+            "hora": r["hora"].astimezone(dt.timezone.utc).isoformat()
+                    if isinstance(r["hora"], dt.datetime) else str(r["hora"]),
+            "created_at": r["created_at"].astimezone(dt.timezone.utc).isoformat()
+                          if isinstance(r["created_at"], dt.datetime) else str(r["created_at"]),
         }
-        features.append(Feature(geometry=GeoPoint(coordinates=[float(lng), float(lat)]),
-                                properties=props))
 
-    return FeatureCollection(features=features)
+        features.append(
+            Feature(
+                geometry=GeoPoint(coordinates=[float(lng), float(lat)]),
+                properties=props,
+            )
+        )
+
+    return FeatureCollection(
+        type="FeatureCollection",
+        features=features
+    )
