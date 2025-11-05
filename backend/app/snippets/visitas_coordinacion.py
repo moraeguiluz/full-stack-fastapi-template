@@ -9,9 +9,7 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 
 import sqlalchemy as sa
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session, sessionmaker
-from sqlalchemy import Integer, String, Boolean, DateTime, ForeignKey, UniqueConstraint, func
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
 
 router = APIRouter(prefix="/coordinadores", tags=["coordinadores"])
 
@@ -19,7 +17,6 @@ router = APIRouter(prefix="/coordinadores", tags=["coordinadores"])
 _DB_URL   = os.getenv("DATABASE_URL")
 _SECRET   = os.getenv("SECRET_KEY", "dev-change-me")
 _ALG      = "HS256"
-_DEBUG    = os.getenv("COORD_DEBUG", "false").lower() == "true"
 
 _engine: Optional[sa.Engine] = None
 _SessionLocal: Optional[sessionmaker] = None
@@ -28,7 +25,7 @@ _inited = False
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/finalize")
 
 def _init_db():
-    """Inicializa engine y crea SOLO la tabla de este snippet (lazy init)."""
+    """Inicializa engine y asegura la tabla app_user_coord (lazy init)."""
     global _engine, _SessionLocal, _inited
     if _inited:
         return
@@ -38,8 +35,30 @@ def _init_db():
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+psycopg://", 1)
     _engine = sa.create_engine(url, pool_pre_ping=True)
-    Base.metadata.create_all(bind=_engine)  # crea app_user_coord si no existe
     _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
+
+    # DDL idempotente para la tabla de vínculos (sin ORM)
+    ddl = """
+    CREATE TABLE IF NOT EXISTS app_user_coord (
+      id SERIAL PRIMARY KEY,
+      coordinador_id INTEGER NOT NULL REFERENCES app_user_auth(id),
+      miembro_id     INTEGER NOT NULL,
+      is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+      selected       BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    -- Índice único para permitir ON CONFLICT
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_app_user_coord_pair
+      ON app_user_coord(coordinador_id, miembro_id);
+
+    -- Índices útiles
+    CREATE INDEX IF NOT EXISTS idx_app_user_coord_coor ON app_user_coord(coordinador_id);
+    CREATE INDEX IF NOT EXISTS idx_app_user_coord_member ON app_user_coord(miembro_id);
+    """
+    with _engine.begin() as con:
+        con.execute(sa.text(ddl))
+
     _inited = True
 
 def get_db():
@@ -69,30 +88,6 @@ def _clean_phone(phone: str) -> str:
     if s.startswith("52") and len(s) == 12: return "+" + s
     return "+" + s
 
-# ---------------- Declarative (SOLO esta tabla) ----------------
-class Base(DeclarativeBase):
-    pass
-
-# app_user_auth (REFLEJO mínimo — NO crea tabla)
-class AppUser(Base):
-    __tablename__ = "app_user_auth"
-    __table_args__ = {"extend_existing": True}
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    nombre: Mapped[Optional[str]] = mapped_column(String(120))
-    apellido_paterno: Mapped[Optional[str]] = mapped_column(String(120))
-    apellido_materno: Mapped[Optional[str]] = mapped_column(String(120))
-    telefono: Mapped[Optional[str]] = mapped_column(String(32))
-
-class UserCoord(Base):
-    __tablename__ = "app_user_coord"
-    __table_args__ = (UniqueConstraint("coordinador_id", "miembro_id", name="uq_app_user_coord_pair"),)
-    id: Mapped[int]             = mapped_column(Integer, primary_key=True, autoincrement=True)
-    coordinador_id: Mapped[int] = mapped_column(Integer, ForeignKey("app_user_auth.id"), index=True)
-    miembro_id: Mapped[int]     = mapped_column(Integer, index=True)
-    is_active: Mapped[bool]     = mapped_column(Boolean, default=True)    # Miembro habilita/deshabilita el vínculo
-    selected: Mapped[bool]      = mapped_column(Boolean, default=False)   # Coordinador marca visibilidad
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
 # ---------------- Pydantic ----------------
 class AddCoordinadorIn(BaseModel):
     telefono: str = Field(..., min_length=7, max_length=32)
@@ -121,6 +116,21 @@ class UpdateMemberBody(BaseModel):
     selected: Optional[bool] = None
     activo: Optional[bool] = None
 
+# ---------------- Helpers SQL ----------------
+def _user_id_by_phone(db: Session, tel: str) -> Optional[int]:
+    q = sa.text("SELECT id FROM app_user_auth WHERE telefono = :tel LIMIT 1")
+    row = db.execute(q, {"tel": tel}).first()
+    return int(row[0]) if row else None
+
+def _user_name_phone(db: Session, uid: int):
+    q = sa.text("""
+        SELECT nombre, apellido_paterno, apellido_materno, telefono
+        FROM app_user_auth WHERE id = :uid LIMIT 1
+    """)
+    row = db.execute(q, {"uid": uid}).first()
+    if not row: return None, None, None, None
+    return row[0], row[1], row[2], row[3]
+
 # ---------------- Endpoints ----------------
 @router.post("", response_model=AddCoordinadorOut)
 def add_coordinador(
@@ -132,38 +142,24 @@ def add_coordinador(
     if not tel or not tel.startswith("+"):
         raise HTTPException(400, "Teléfono inválido. Usa formato internacional, ej. +527771234567")
 
-    try:
-        # busca usuario por teléfono (no asume columna is_active)
-        coor = db.query(AppUser).filter(AppUser.telefono == tel).first()
-        if not coor:
-            raise HTTPException(404, "No se encontró un usuario con ese teléfono.")
-        if int(coor.id) == uid:
-            raise HTTPException(400, "No puedes agregarte como tu propio coordinador.")
+    coor_id = _user_id_by_phone(db, tel)
+    if not coor_id:
+        raise HTTPException(404, "No se encontró un usuario con ese teléfono.")
+    if coor_id == uid:
+        raise HTTPException(400, "No puedes agregarte como tu propio coordinador.")
 
-        # intenta crear vínculo
-        rel = UserCoord(coordinador_id=int(coor.id), miembro_id=uid, is_active=True, selected=False)
-        db.add(rel)
-        try:
-            db.commit()
-            return AddCoordinadorOut(ok=True, coordinador_id=int(coor.id), already_linked=False)
-        except IntegrityError:
-            db.rollback()
-            # Ya existe el par, re-activa si estaba desactivado
-            existing = db.query(UserCoord).filter(
-                UserCoord.coordinador_id == int(coor.id),
-                UserCoord.miembro_id == uid
-            ).with_for_update().one()
-            already = existing.is_active
-            if not existing.is_active:
-                existing.is_active = True
-                db.commit()
-            return AddCoordinadorOut(ok=True, coordinador_id=int(coor.id), already_linked=already)
-    except HTTPException:
-        raise
-    except Exception as ex:
-        if _DEBUG:
-            raise HTTPException(500, f"Internal error: {ex}")
-        raise HTTPException(500, "Internal error")
+    # UPSERT atómico: inserta o reactiva (is_active=TRUE) si ya existe
+    q = sa.text("""
+        INSERT INTO app_user_coord (coordinador_id, miembro_id, is_active, selected)
+        VALUES (:coor, :mem, TRUE, FALSE)
+        ON CONFLICT (coordinador_id, miembro_id)
+        DO UPDATE SET is_active = TRUE
+        RETURNING is_active;
+    """)
+    row = db.execute(q, {"coor": coor_id, "mem": uid}).first()
+    db.commit()
+    # si ya existía y estaba activo, el RETURNING seguirá siendo true, pero para el cliente es ok
+    return AddCoordinadorOut(ok=True, coordinador_id=coor_id, already_linked=True)
 
 @router.get("", response_model=List[CoordinadorOut])
 def list_mis_coordinadores(
@@ -171,22 +167,25 @@ def list_mis_coordinadores(
     uid: int = Depends(_current_user_id),
     include_inactivos: bool = Query(False),
 ):
-    q = db.query(
-        UserCoord.coordinador_id,
-        AppUser.nombre, AppUser.apellido_paterno, AppUser.apellido_materno,
-        AppUser.telefono, UserCoord.is_active
-    ).join(AppUser, AppUser.id == UserCoord.coordinador_id).filter(UserCoord.miembro_id == uid)
-    if not include_inactivos:
-        q = q.filter(UserCoord.is_active == True)  # noqa: E712
-
+    q = sa.text(f"""
+        SELECT uc.coordinador_id,
+               u.nombre, u.apellido_paterno, u.apellido_materno, u.telefono,
+               uc.is_active
+        FROM app_user_coord uc
+        JOIN app_user_auth u ON u.id = uc.coordinador_id
+        WHERE uc.miembro_id = :uid
+        {"AND uc.is_active = TRUE" if not include_inactivos else ""}
+        ORDER BY u.nombre NULLS LAST, u.apellido_paterno NULLS LAST
+    """)
+    rows = db.execute(q, {"uid": uid}).mappings().all()
     out: List[CoordinadorOut] = []
-    for coor_id, n, ap, am, tel, activo in q.all():
-        full = " ".join(p for p in [n, ap, am] if p)
+    for r in rows:
+        full = " ".join(p for p in [r["nombre"], r["apellido_paterno"], r["apellido_materno"]] if p)
         out.append(CoordinadorOut(
-            coordinador_id=int(coor_id),
+            coordinador_id=int(r["coordinador_id"]),
             nombre=full or None,
-            telefono=tel,
-            activo=bool(activo),
+            telefono=r["telefono"],
+            activo=bool(r["is_active"]),
         ))
     return out
 
@@ -197,22 +196,30 @@ def activar_desactivar_coordinador(
     db: Session = Depends(get_db),
     uid: int = Depends(_current_user_id),
 ):
-    rel = db.query(UserCoord).filter(
-        UserCoord.coordinador_id == coordinador_id,
-        UserCoord.miembro_id == uid
-    ).one_or_none()
-    if not rel:
+    # valida existencia
+    chk = sa.text("""
+        SELECT id FROM app_user_coord
+        WHERE coordinador_id = :coor AND miembro_id = :mem LIMIT 1
+    """)
+    row = db.execute(chk, {"coor": coordinador_id, "mem": uid}).first()
+    if not row:
         raise HTTPException(404, "Relación no encontrada.")
-    rel.is_active = bool(activo)
+
+    upd = sa.text("""
+        UPDATE app_user_coord
+        SET is_active = :act
+        WHERE coordinador_id = :coor AND miembro_id = :mem
+    """)
+    db.execute(upd, {"act": activo, "coor": coordinador_id, "mem": uid})
     db.commit()
 
-    u = db.query(AppUser).get(coordinador_id)
-    full = " ".join(p for p in [u.nombre if u else None, u.apellido_paterno if u else None, u.apellido_materno if u else None] if p)
+    n, ap, am, tel = _user_name_phone(db, coordinador_id)
+    full = " ".join(p for p in [n, ap, am] if p)
     return CoordinadorOut(
         coordinador_id=coordinador_id,
         nombre=full or None,
-        telefono=u.telefono if u else None,
-        activo=rel.is_active,
+        telefono=tel,
+        activo=bool(activo),
     )
 
 @router.get("/mis-miembros", response_model=List[MiembroOut])
@@ -221,25 +228,27 @@ def list_mis_miembros(
     uid: int = Depends(_current_user_id),
     include_inactivos: bool = Query(False),
 ):
-    q = db.query(
-        AppUser.id.label("miembro_id"),
-        AppUser.nombre, AppUser.apellido_paterno, AppUser.apellido_materno,
-        AppUser.telefono, UserCoord.selected, UserCoord.is_active
-    ).join(AppUser, AppUser.id == UserCoord.miembro_id).filter(UserCoord.coordinador_id == uid)
-    if not include_inactivos:
-        q = q.filter(UserCoord.is_active == True)  # noqa: E712
-
+    q = sa.text(f"""
+        SELECT u.id AS miembro_id,
+               u.nombre, u.apellido_paterno, u.apellido_materno, u.telefono,
+               uc.selected, uc.is_active
+        FROM app_user_coord uc
+        JOIN app_user_auth u ON u.id = uc.miembro_id
+        WHERE uc.coordinador_id = :uid
+        {"AND uc.is_active = TRUE" if not include_inactivos else ""}
+        ORDER BY u.nombre NULLS LAST, u.apellido_paterno NULLS LAST
+    """)
     return [
         MiembroOut(
-            miembro_id=int(r.miembro_id),
-            nombre=r.nombre,
-            apellido_paterno=r.apellido_paterno,
-            apellido_materno=r.apellido_materno,
-            telefono=r.telefono,
-            selected=bool(r.selected),
-            activo=bool(r.is_active),
+            miembro_id=int(r["miembro_id"]),
+            nombre=r["nombre"],
+            apellido_paterno=r["apellido_paterno"],
+            apellido_materno=r["apellido_materno"],
+            telefono=r["telefono"],
+            selected=bool(r["selected"]),
+            activo=bool(r["is_active"]),
         )
-        for r in q.all()
+        for r in db.execute(q, {"uid": uid}).mappings().all()
     ]
 
 @router.patch("/mis-miembros/{miembro_id}", response_model=MiembroOut)
@@ -249,26 +258,44 @@ def update_miembro_por_coordinador(
     db: Session = Depends(get_db),
     uid: int = Depends(_current_user_id),
 ):
-    rel = db.query(UserCoord).filter(
-        UserCoord.coordinador_id == uid,
-        UserCoord.miembro_id == miembro_id
-    ).one_or_none()
-    if not rel:
+    # valida existencia
+    chk = sa.text("""
+        SELECT id FROM app_user_coord
+        WHERE coordinador_id = :coor AND miembro_id = :mem LIMIT 1
+    """)
+    row = db.execute(chk, {"coor": uid, "mem": miembro_id}).first()
+    if not row:
         raise HTTPException(404, "No tienes asignado a este miembro.")
 
+    sets = []
+    params = {"coor": uid, "mem": miembro_id}
     if body.selected is not None:
-        rel.selected = bool(body.selected)
+        sets.append("selected = :sel")
+        params["sel"] = bool(body.selected)
     if body.activo is not None:
-        rel.is_active = bool(body.activo)
-    db.commit()
+        sets.append("is_active = :act")
+        params["act"] = bool(body.activo)
 
-    u = db.query(AppUser).get(miembro_id)
+    if sets:
+        upd = sa.text(f"""
+            UPDATE app_user_coord
+            SET {", ".join(sets)}
+            WHERE coordinador_id = :coor AND miembro_id = :mem
+        """)
+        db.execute(upd, params)
+        db.commit()
+
+    n, ap, am, tel = _user_name_phone(db, miembro_id)
+    # lee el estado actualizado
+    st = sa.text("""
+        SELECT selected, is_active FROM app_user_coord
+        WHERE coordinador_id = :coor AND miembro_id = :mem
+        LIMIT 1
+    """)
+    strow = db.execute(st, {"coor": uid, "mem": miembro_id}).first()
     return MiembroOut(
         miembro_id=miembro_id,
-        nombre=u.nombre if u else None,
-        apellido_paterno=u.apellido_paterno if u else None,
-        apellido_materno=u.apellido_materno if u else None,
-        telefono=u.telefono if u else None,
-        selected=rel.selected,
-        activo=rel.is_active,
+        nombre=n, apellido_paterno=ap, apellido_materno=am, telefono=tel,
+        selected=bool(strow[0]) if strow else False,
+        activo=bool(strow[1]) if strow else False,
     )
