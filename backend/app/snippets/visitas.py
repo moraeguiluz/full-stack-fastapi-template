@@ -72,6 +72,8 @@ class Visit(Base):
     __tablename__ = "app_visita"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, index=True)
+    # NUEVO: código base para agrupar campañas / bloques de visitas
+    codigo_base: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     nombre: Mapped[str] = mapped_column(String(120), default="")
     apellido_paterno: Mapped[str] = mapped_column(String(120), default="")
     apellido_materno: Mapped[str] = mapped_column(String(120), default="")
@@ -112,6 +114,8 @@ class VisitCreate(BaseModel):
     hora: Optional[dt.datetime] = None
     adultos: Optional[int] = Field(default=None, ge=0, le=50)
     notas: Optional[str] = Field(default=None, max_length=2000)
+    # NUEVO: código base opcional
+    codigo_base: Optional[str] = Field(default=None, max_length=64)
 
 class VisitOut(BaseModel):
     id: int
@@ -127,6 +131,8 @@ class VisitOut(BaseModel):
     notas: str
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None
+    # NUEVO: incluir código base en la salida
+    codigo_base: Optional[str] = None
     registrador_id: Optional[int] = None
     registrador_nombre: Optional[str] = None
 
@@ -147,6 +153,8 @@ class VisitPatch(BaseModel):
     hora: Optional[dt.datetime] = None
     adultos: Optional[int] = Field(default=None, ge=0, le=50)
     notas: Optional[str] = Field(default=None, max_length=2000)
+    # NUEVO: permitir actualizar código base
+    codigo_base: Optional[str] = Field(default=None, max_length=64)
 
 # -------- Endpoints --------
 @router.post("", response_model=VisitOut)
@@ -157,6 +165,7 @@ def crear_visita(
 ):
     v = Visit(
         user_id=uid,
+        codigo_base=(payload.codigo_base or None),  # NUEVO
         nombre=payload.nombre.strip(),
         apellido_paterno=(payload.apellido_paterno or "").strip(),
         apellido_materno=(payload.apellido_materno or "").strip(),
@@ -175,7 +184,7 @@ def crear_visita(
     return VisitOut(
         **{c: getattr(v, c) for c in [
             "id","user_id","nombre","apellido_paterno","apellido_materno",
-            "telefono","lat","lng","hora","adultos","notas","created_at","updated_at"
+            "telefono","lat","lng","hora","adultos","notas","created_at","updated_at","codigo_base"
         ]},
         registrador_id=uid,
         registrador_nombre=" ".join(p for p in [reg.nombre if reg else None, reg.apellido_paterno if reg else None, reg.apellido_materno if reg else None] if p),
@@ -192,6 +201,12 @@ def listar_visitas(
     with_location: Optional[bool] = Query(None, description="true=solo con lat/lng; false=solo sin; null=todos"),
     include_team: bool = Query(False, description="Incluir visitas de miembros a quienes coordino"),
     team_selected_only: bool = Query(True, description="Si include_team, incluir solo miembros marcados selected=true"),
+    # NUEVO: filtro por código base
+    codigo_base: Optional[str] = Query(
+        None,
+        max_length=64,
+        description="Filtrar por código base exacto",
+    ),
 ):
     from_dt = _ensure_tz(from_dt)
     to_dt = _ensure_tz(to_dt)
@@ -229,6 +244,10 @@ def listar_visitas(
             elif with_location is False:
                 conds += [Visit.lat.is_(None), Visit.lng.is_(None)]
 
+    # NUEVO: aplicar filtro de código base al final, para que aplique a todas las combinaciones
+    if codigo_base:
+        conds.append(Visit.codigo_base == codigo_base)
+
     base_q = select(Visit).where(and_(*conds)).order_by(Visit.hora.desc())
 
     total = db.execute(
@@ -249,7 +268,7 @@ def listar_visitas(
         out_items.append(VisitOut(
             **{c: getattr(v, c) for c in [
                 "id","user_id","nombre","apellido_paterno","apellido_materno",
-                "telefono","lat","lng","hora","adultos","notas","created_at","updated_at"
+                "telefono","lat","lng","hora","adultos","notas","created_at","updated_at","codigo_base"
             ]},
             registrador_id=v.user_id,
             registrador_nombre=nm or None,
@@ -284,7 +303,7 @@ def obtener_visita(
     return VisitOut(
         **{c: getattr(v, c) for c in [
             "id","user_id","nombre","apellido_paterno","apellido_materno",
-            "telefono","lat","lng","hora","adultos","notas","created_at","updated_at"
+            "telefono","lat","lng","hora","adultos","notas","created_at","updated_at","codigo_base"
         ]},
         registrador_id=v.user_id,
         registrador_nombre=nm or None,
@@ -313,6 +332,9 @@ def actualizar_visita(
     if payload.hora is not None: v.hora = _ensure_tz(payload.hora) or v.hora
     if payload.adultos is not None: v.adultos = payload.adultos
     if payload.notas is not None: v.notas = payload.notas.strip()
+    # NUEVO: permitir cambiar / limpiar código base
+    if payload.codigo_base is not None:
+        v.codigo_base = payload.codigo_base or None
 
     db.commit()
     db.refresh(v)
@@ -322,7 +344,7 @@ def actualizar_visita(
     return VisitOut(
         **{c: getattr(v, c) for c in [
             "id","user_id","nombre","apellido_paterno","apellido_materno",
-            "telefono","lat","lng","hora","adultos","notas","created_at","updated_at"
+            "telefono","lat","lng","hora","adultos","notas","created_at","updated_at","codigo_base"
         ]},
         registrador_id=v.user_id,
         registrador_nombre=nm or None,
