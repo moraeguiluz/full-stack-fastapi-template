@@ -14,6 +14,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import (
     DeclarativeBase, Mapped, mapped_column, Session, sessionmaker
 )
+from sqlalchemy.dialects.postgresql import JSONB  # NUEVO: para extra_schema JSONB
 
 router = APIRouter(prefix="/codigo-base", tags=["codigo_base"])
 
@@ -92,6 +93,8 @@ class CodigoBase(Base):
         server_default=func.now(),
         index=True,
     )
+    # NUEVO: definición de campos extra para visitas (schema de extra JSONB)
+    extra_schema: Mapped[list] = mapped_column(JSONB, default=list)
 
 
 class CodigoBaseUser(Base):
@@ -183,6 +186,46 @@ class CodigoBaseAdminMembersOut(BaseModel):
     nombre: str
     miembros: List[CodigoBaseAdminMemberOut]
     pendientes: List[CodigoBaseAdminMemberOut]
+
+
+# -------- NUEVOS Schemas: definición de campos extra --------
+
+# Tipos de campo permitidos para el schema de extra
+_ALLOWED_FIELD_TYPES = {
+    "texto_corto",
+    "texto_largo",
+    "numero",
+    "si_no",
+    "opcion_unica",
+    "opcion_multiple",
+    "fecha",
+    "imagen_url",
+}
+
+
+class CodigoBaseFieldSchema(BaseModel):
+    key: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=120)
+    type: str = Field(min_length=1, max_length=32)
+    required: bool = False
+    order: int = 0
+    options: Optional[List[str]] = None
+
+
+class CodigoBaseSchemaOut(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = None
+    admin_id: Optional[int] = None
+    allow_any: bool
+    is_active: bool
+    fields: List[CodigoBaseFieldSchema]
+
+
+class CodigoBaseSchemaIn(BaseModel):
+    codigo: str = Field(min_length=3, max_length=64)
+    fields: List[CodigoBaseFieldSchema]
 
 
 # -------- Endpoint: verificar código base --------
@@ -611,3 +654,104 @@ def admin_remove_member(
     db.delete(cu)
     db.commit()
     return {"ok": True}
+
+
+# ================= ADMIN: schema de campos extra (extra_schema) =================
+
+def _normalize_extra_schema(raw: Optional[object]) -> List[Dict]:
+    """
+    Normaliza extra_schema a una lista de diccionarios.
+    - Si es None -> []
+    - Si es lista -> sólo diccionarios válidos
+    - Si es dict -> lo envuelve en lista
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [d for d in raw if isinstance(d, dict)]
+    if isinstance(raw, dict):
+        return [raw]
+    return []
+
+
+@router.get("/admin/schema", response_model=CodigoBaseSchemaOut)
+def admin_get_schema(
+    codigo: str,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    cb = _require_admin_for_codigo(db, uid, codigo)
+
+    raw_fields = _normalize_extra_schema(cb.extra_schema)
+    fields: List[CodigoBaseFieldSchema] = []
+    for item in raw_fields:
+        try:
+            fields.append(CodigoBaseFieldSchema(**item))
+        except Exception:
+            # Ignoramos entradas inválidas para no romper la UI
+            continue
+
+    return CodigoBaseSchemaOut(
+        id=cb.id,
+        codigo=cb.codigo,
+        nombre=cb.nombre,
+        descripcion=cb.descripcion or None,
+        admin_id=cb.admin_id,
+        allow_any=cb.allow_any,
+        is_active=cb.is_active,
+        fields=fields,
+    )
+
+
+@router.post("/admin/schema", response_model=CodigoBaseSchemaOut)
+def admin_set_schema(
+    payload: CodigoBaseSchemaIn,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    cb = _require_admin_for_codigo(db, uid, payload.codigo)
+
+    # Validar tipos permitidos y claves únicas
+    seen_keys: set[str] = set()
+    clean_fields: List[Dict] = []
+
+    for f in payload.fields:
+        key = f.key.strip()
+        type_ = f.type.strip()
+        if not key:
+            raise HTTPException(400, "Todos los campos deben tener 'key'")
+        if key in seen_keys:
+            raise HTTPException(400, f"Clave de campo duplicada: {key}")
+        seen_keys.add(key)
+
+        if type_ not in _ALLOWED_FIELD_TYPES:
+            raise HTTPException(400, f"Tipo de campo no permitido: {type_}")
+
+        data = f.model_dump(exclude_none=True)
+        data["key"] = key
+        data["type"] = type_
+        clean_fields.append(data)
+
+    cb.extra_schema = clean_fields
+    db.commit()
+    db.refresh(cb)
+
+    # Responder usando el mismo formato que GET
+    raw_fields = _normalize_extra_schema(cb.extra_schema)
+    fields: List[CodigoBaseFieldSchema] = []
+    for item in raw_fields:
+        try:
+            fields.append(CodigoBaseFieldSchema(**item))
+        except Exception:
+            continue
+
+    return CodigoBaseSchemaOut(
+        id=cb.id,
+        codigo=cb.codigo,
+        nombre=cb.nombre,
+        descripcion=cb.descripcion or None,
+        admin_id=cb.admin_id,
+        allow_any=cb.allow_any,
+        is_active=cb.is_active,
+        fields=fields,
+    )
