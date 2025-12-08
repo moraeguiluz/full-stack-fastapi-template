@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os, datetime as dt, jwt
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
@@ -37,7 +37,7 @@ def _init_db():
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+psycopg://", 1)
     _engine = create_engine(url, pool_pre_ping=True)
-    # Sólo crea tablas si no existen según estos modelos
+    # Crea sólo las tablas de este snippet si no existen.
     Base.metadata.create_all(bind=_engine)
     _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
     _inited = True
@@ -188,7 +188,7 @@ def verify_codigo_base(
     if not cb.allow_any and not es_admin and not es_miembro:
         raise HTTPException(403, "No estás autorizado para este código base")
 
-    # Si permite a cualquiera y aún no es miembro aprovado, lo agregamos
+    # Si permite a cualquiera y aún no es miembro aprobado, lo agregamos
     if cb.allow_any and not es_miembro:
         new_m = CodigoBaseUser(
             codigo_base_id=cb.id,
@@ -257,7 +257,7 @@ def request_join_codigo_base(
             allow_any=cb.allow_any,
         )
 
-    # Si el código permite a cualquiera, no tiene sentido solicitar: se auto-aprueba
+    # Si el código permite a cualquiera, se auto-aprueba sin solicitud pendiente
     if cb.allow_any:
         new_m = CodigoBaseUser(
             codigo_base_id=cb.id,
@@ -325,3 +325,74 @@ def request_join_codigo_base(
         admin_id=cb.admin_id,
         allow_any=cb.allow_any,
     )
+
+
+# -------- Endpoint: listar códigos base del usuario --------
+@router.get("/mis-codigos", response_model=List[CodigoBaseVerifyResult])
+def mis_codigos_base(
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    # Códigos donde es admin
+    admin_cbs = db.execute(
+        select(CodigoBase).where(
+            CodigoBase.admin_id == uid,
+            CodigoBase.is_active == True,  # noqa: E712
+        )
+    ).scalars().all()
+
+    # Códigos donde es miembro aprobado
+    member_rows = db.execute(
+        select(CodigoBase, CodigoBaseUser).join(
+            CodigoBaseUser,
+            CodigoBaseUser.codigo_base_id == CodigoBase.id,
+        ).where(
+            CodigoBaseUser.user_id == uid,
+            CodigoBaseUser.status == "approved",
+            CodigoBaseUser.is_active == True,  # noqa: E712
+            CodigoBase.is_active == True,      # noqa: E712
+        )
+    ).all()
+
+    # Combinar resultados sin duplicar
+    by_id: dict[int, dict] = {}
+
+    for cb in admin_cbs:
+        by_id[cb.id] = dict(
+            cb=cb,
+            es_admin=True,
+            es_miembro=True,  # admin también cuenta como miembro
+        )
+
+    for cb, cu in member_rows:
+        existing = by_id.get(cb.id)
+        if existing is None:
+            by_id[cb.id] = dict(
+                cb=cb,
+                es_admin=(cb.admin_id == uid),
+                es_miembro=True,
+            )
+        else:
+            existing["es_miembro"] = True
+            existing["es_admin"] = existing["es_admin"] or (cb.admin_id == uid)
+
+    out: list[CodigoBaseVerifyResult] = []
+    for entry in by_id.values():
+        cb = entry["cb"]
+        es_admin = bool(entry["es_admin"])
+        es_miembro = bool(entry["es_miembro"])
+        out.append(
+            CodigoBaseVerifyResult(
+                id=cb.id,
+                codigo=cb.codigo,
+                nombre=cb.nombre,
+                descripcion=cb.descripcion or None,
+                admin_id=cb.admin_id,
+                allow_any=cb.allow_any,
+                is_active=cb.is_active,
+                es_admin=es_admin,
+                es_miembro=es_miembro,
+            )
+        )
+
+    return out
