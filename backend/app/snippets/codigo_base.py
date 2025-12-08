@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os, datetime as dt, jwt
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
@@ -114,6 +114,16 @@ class CodigoBaseUser(Base):
     decided_by: Mapped[Optional[int]] = mapped_column(Integer, default=None)
 
 
+# Mapeo mínimo para nombres de usuario (Sólo lectura)
+class AppUser(Base):
+    __tablename__ = "app_user_auth"
+    __table_args__ = {"extend_existing": True}
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    nombre: Mapped[Optional[str]] = mapped_column(String(120))
+    apellido_paterno: Mapped[Optional[str]] = mapped_column(String(120))
+    apellido_materno: Mapped[Optional[str]] = mapped_column(String(120))
+
+
 # -------- Schemas --------
 class CodigoBaseVerifyIn(BaseModel):
     codigo: str = Field(min_length=3, max_length=64)
@@ -150,6 +160,29 @@ class CodigoBaseRequestJoinOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# --- Admin: miembros / solicitudes ---
+class CodigoBaseAdminMemberOut(BaseModel):
+    membership_id: int
+    user_id: int
+    nombre: Optional[str] = None
+    status: str
+    is_active: bool
+    is_manager: bool
+    joined_at: Optional[dt.datetime] = None
+    message: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CodigoBaseAdminMembersOut(BaseModel):
+    codigo_base_id: int
+    codigo: str
+    nombre: str
+    miembros: List[CodigoBaseAdminMemberOut]
+    pendientes: List[CodigoBaseAdminMemberOut]
 
 
 # -------- Endpoint: verificar código base --------
@@ -396,3 +429,185 @@ def mis_codigos_base(
         )
 
     return out
+
+
+# ================= ADMIN: miembros y solicitudes =================
+
+def _require_admin_for_codigo(
+    db: Session,
+    uid: int,
+    codigo: str,
+) -> CodigoBase:
+    codigo = codigo.strip()
+    if not codigo:
+        raise HTTPException(400, "Código base vacío")
+
+    cb = db.execute(
+        select(CodigoBase).where(CodigoBase.codigo == codigo)
+    ).scalars().first()
+    if cb is None or not cb.is_active:
+        raise HTTPException(404, "Código base no válido o inactivo")
+
+    if cb.admin_id != uid:
+        raise HTTPException(403, "No eres administrador de este código base")
+
+    return cb
+
+
+def _full_name(u: Optional[AppUser]) -> Optional[str]:
+    if not u:
+        return None
+    parts = [u.nombre, u.apellido_paterno, u.apellido_materno]
+    name = " ".join(p for p in parts if p)
+    return name or None
+
+
+@router.get("/admin/members", response_model=CodigoBaseAdminMembersOut)
+def admin_list_members(
+    codigo: str,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    cb = _require_admin_for_codigo(db, uid, codigo)
+
+    rows = db.execute(
+        select(CodigoBaseUser, AppUser).join(
+            AppUser,
+            AppUser.id == CodigoBaseUser.user_id,
+            isouter=True,
+        ).where(
+            CodigoBaseUser.codigo_base_id == cb.id
+        )
+    ).all()
+
+    miembros: List[CodigoBaseAdminMemberOut] = []
+    pendientes: List[CodigoBaseAdminMemberOut] = []
+
+    for cu, u in rows:
+        item = CodigoBaseAdminMemberOut(
+            membership_id=cu.id,
+            user_id=cu.user_id,
+            nombre=_full_name(u),
+            status=cu.status,
+            is_active=cu.is_active,
+            is_manager=cu.is_manager,
+            joined_at=cu.joined_at,
+            message=cu.message,
+        )
+        if cu.status == "pending":
+            pendientes.append(item)
+        elif cu.status == "approved":
+            miembros.append(item)
+        # status 'rejected' no lo mostramos en la UI normal
+
+    return CodigoBaseAdminMembersOut(
+        codigo_base_id=cb.id,
+        codigo=cb.codigo,
+        nombre=cb.nombre,
+        miembros=miembros,
+        pendientes=pendientes,
+    )
+
+
+@router.post("/admin/membership/{membership_id}/approve", response_model=CodigoBaseAdminMemberOut)
+def admin_approve_membership(
+    membership_id: int,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    cu = db.get(CodigoBaseUser, membership_id)
+    if not cu:
+        raise HTTPException(404, "Membresía no encontrada")
+
+    cb = db.execute(
+        select(CodigoBase).where(CodigoBase.id == cu.codigo_base_id)
+    ).scalars().first()
+    if cb is None or not cb.is_active:
+        raise HTTPException(404, "Código base no válido o inactivo")
+    if cb.admin_id != uid:
+        raise HTTPException(403, "No eres administrador de este código base")
+
+    cu.status = "approved"
+    cu.is_active = True
+    cu.decided_at = _now_utc()
+    cu.decided_by = uid
+    if cu.joined_at is None:
+        cu.joined_at = _now_utc()
+
+    db.commit()
+    db.refresh(cu)
+
+    u = db.get(AppUser, cu.user_id)
+    return CodigoBaseAdminMemberOut(
+        membership_id=cu.id,
+        user_id=cu.user_id,
+        nombre=_full_name(u),
+        status=cu.status,
+        is_active=cu.is_active,
+        is_manager=cu.is_manager,
+        joined_at=cu.joined_at,
+        message=cu.message,
+    )
+
+
+@router.post("/admin/membership/{membership_id}/reject", response_model=CodigoBaseAdminMemberOut)
+def admin_reject_membership(
+    membership_id: int,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    cu = db.get(CodigoBaseUser, membership_id)
+    if not cu:
+        raise HTTPException(404, "Membresía no encontrada")
+
+    cb = db.execute(
+        select(CodigoBase).where(CodigoBase.id == cu.codigo_base_id)
+    ).scalars().first()
+    if cb is None or not cb.is_active:
+        raise HTTPException(404, "Código base no válido o inactivo")
+    if cb.admin_id != uid:
+        raise HTTPException(403, "No eres administrador de este código base")
+
+    cu.status = "rejected"
+    cu.is_active = False
+    cu.decided_at = _now_utc()
+    cu.decided_by = uid
+
+    db.commit()
+    db.refresh(cu)
+
+    u = db.get(AppUser, cu.user_id)
+    return CodigoBaseAdminMemberOut(
+        membership_id=cu.id,
+        user_id=cu.user_id,
+        nombre=_full_name(u),
+        status=cu.status,
+        is_active=cu.is_active,
+        is_manager=cu.is_manager,
+        joined_at=cu.joined_at,
+        message=cu.message,
+    )
+
+
+@router.post("/admin/membership/{membership_id}/remove")
+def admin_remove_member(
+    membership_id: int,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    cu = db.get(CodigoBaseUser, membership_id)
+    if not cu:
+        raise HTTPException(404, "Membresía no encontrada")
+
+    cb = db.execute(
+        select(CodigoBase).where(CodigoBase.id == cu.codigo_base_id)
+    ).scalars().first()
+    if cb is None or not cb.is_active:
+        raise HTTPException(404, "Código base no válido o inactivo")
+    if cb.admin_id != uid:
+        raise HTTPException(403, "No eres administrador de este código base")
+
+    # Para simplificar: eliminamos el registro.
+    db.delete(cu)
+    db.commit()
+    return {"ok": True}
