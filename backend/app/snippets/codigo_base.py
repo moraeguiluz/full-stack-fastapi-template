@@ -129,7 +129,7 @@ class AppUser(Base):
 
 # -------- Schemas --------
 class CodigoBaseVerifyIn(BaseModel):
-    codigo: str = Field(min_length=3, max_length=64)
+  codigo: str = Field(min_length=3, max_length=64)
 
 
 class CodigoBaseVerifyResult(BaseModel):
@@ -672,6 +672,89 @@ def _normalize_extra_schema(raw: Optional[object]) -> List[Dict]:
     if isinstance(raw, dict):
         return [raw]
     return []
+
+
+def _require_member_or_public_for_codigo(
+    db: Session,
+    uid: int,
+    codigo: str,
+) -> CodigoBase:
+    """
+    Permite acceso al Código Base si:
+    - el usuario es admin del código, o
+    - el código tiene allow_any = True, o
+    - el usuario es miembro aprobado y activo.
+    """
+    codigo = codigo.strip()
+    if not codigo:
+        raise HTTPException(400, "Código base vacío")
+
+    cb = db.execute(
+        select(CodigoBase).where(CodigoBase.codigo == codigo)
+    ).scalars().first()
+
+    if cb is None or not cb.is_active:
+        raise HTTPException(404, "Código base no válido o inactivo")
+
+    # Admin siempre tiene acceso
+    if cb.admin_id == uid:
+        return cb
+
+    # Si allow_any, cualquiera autenticado puede leer el schema
+    if cb.allow_any:
+        return cb
+
+    # Caso normal: sólo miembros aprobados y activos
+    memb = db.execute(
+        select(CodigoBaseUser).where(
+            CodigoBaseUser.codigo_base_id == cb.id,
+            CodigoBaseUser.user_id == uid,
+            CodigoBaseUser.status == "approved",
+            CodigoBaseUser.is_active == True,  # noqa: E712
+        )
+    ).scalars().first()
+
+    if memb is None:
+        raise HTTPException(403, "No estás autorizado para este código base")
+
+    return cb
+
+
+@router.get("/schema", response_model=CodigoBaseSchemaOut)
+def get_schema_para_app(
+    codigo: str,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    """
+    Endpoint para la APP (no admin) que devuelve el schema de campos extra.
+
+    Acceso:
+    - Admin del código base, o
+    - Miembro aprobado y activo, o
+    - Cualquier usuario si allow_any = True.
+    """
+    cb = _require_member_or_public_for_codigo(db, uid, codigo)
+
+    raw_fields = _normalize_extra_schema(cb.extra_schema)
+    fields: List[CodigoBaseFieldSchema] = []
+    for item in raw_fields:
+        try:
+            fields.append(CodigoBaseFieldSchema(**item))
+        except Exception:
+            # Ignoramos entradas inválidas para no romper la UI
+            continue
+
+    return CodigoBaseSchemaOut(
+        id=cb.id,
+        codigo=cb.codigo,
+        nombre=cb.nombre,
+        descripcion=cb.descripcion or None,
+        admin_id=cb.admin_id,
+        allow_any=cb.allow_any,
+        is_active=cb.is_active,
+        fields=fields,
+    )
 
 
 @router.get("/admin/schema", response_model=CodigoBaseSchemaOut)
