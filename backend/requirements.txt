@@ -10,3 +10,5 @@ psycopg[binary]>=3.2
 passlib>=1.7
 PyJWT>=2.8
 requests>=2.31
+google-cloud-storage>=2.10.0
+google-auth>=2.0.0
