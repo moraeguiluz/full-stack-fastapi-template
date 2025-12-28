@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os, json, datetime as dt, jwt
-from typing import Optional, List, Literal, Any, Dict, Tuple
+from typing import Optional, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import OAuth2PasswordBearer
@@ -23,7 +23,11 @@ _DB_URL = os.getenv("DATABASE_URL")
 _SECRET = os.getenv("SECRET_KEY", "dev-change-me")
 _ALG = "HS256"
 
-# Admin simple por env: "1,2,3"
+# TEMP: permitir admin a cualquier usuario autenticado para pruebas.
+# Pon OPEN_INSIGNIAS_ADMIN=false para volver a restringir.
+_OPEN_INSIGNIAS_ADMIN = os.getenv("OPEN_INSIGNIAS_ADMIN", "true").lower() == "true"
+
+# Si OPEN_INSIGNIAS_ADMIN=false, entonces se usa ADMIN_USER_IDS="1,2,3"
 _ADMIN_USER_IDS = {int(x) for x in (os.getenv("ADMIN_USER_IDS", "")).split(",") if x.strip().isdigit()}
 
 _engine = None
@@ -55,8 +59,10 @@ def _current_user_id(token: str = Depends(oauth2)) -> int:
 
 
 def _require_admin(uid: int):
+    if _OPEN_INSIGNIAS_ADMIN:
+        return
     if not _ADMIN_USER_IDS:
-        raise HTTPException(403, "Admin no configurado (define ADMIN_USER_IDS)")
+        raise HTTPException(403, "Admin no configurado (define ADMIN_USER_IDS o OPEN_INSIGNIAS_ADMIN=true)")
     if uid not in _ADMIN_USER_IDS:
         raise HTTPException(403, "No autorizado (admin)")
 
@@ -69,7 +75,7 @@ class Base(DeclarativeBase):
 
 class Visit(Base):
     """
-    Mapeo mínimo de app_visita (YA existe). Solo lo necesario para verificación.
+    Mapeo mínimo de app_visita (YA existe).
     """
     __tablename__ = "app_visita"
     __table_args__ = {"extend_existing": True}
@@ -96,29 +102,27 @@ class Insignia(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     codigo_base: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
-    tipo: Mapped[str] = mapped_column(String(32), index=True)  # InsigniaType
+    tipo: Mapped[str] = mapped_column(String(32), index=True)
 
     titulo: Mapped[str] = mapped_column(String(160), default="")
     image_url: Mapped[str] = mapped_column(String(600), default="")
     orden: Mapped[int] = mapped_column(Integer, default=0, index=True)
     activa: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
-    # Reglas / display
-    requisitos: Mapped[dict] = mapped_column(JSONB, default=dict)  # required_visits, window_days, filtros...
-    display: Mapped[dict] = mapped_column(JSONB, default=dict)     # reglas UI (minimizar, hints, etc.)
+    requisitos: Mapped[dict] = mapped_column(JSONB, default=dict)
+    display: Mapped[dict] = mapped_column(JSONB, default=dict)
 
-    # GeoJSON para polígonos (cuando aplique)
-    geom_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    bbox: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)  # {minLat,minLng,maxLat,maxLng}
+    # IMPORTANTÍSIMO:
+    # none_as_null=True evita guardar JSON null ('null'::jsonb). En vez de eso guarda SQL NULL.
+    # Esto evita que índices/funciones PostGIS se rompan con geom_json = 'null'.
+    geom_json: Mapped[Optional[dict]] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    bbox: Mapped[Optional[dict]] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class InsigniaClaim(Base):
-    """
-    Estado por usuario (reclamo).
-    """
     __tablename__ = "app_insignia_claim"
     __table_args__ = (
         UniqueConstraint("user_id", "insignia_id", name="uq_insignia_claim_user_insignia"),
@@ -137,9 +141,9 @@ class InsigniaClaim(Base):
 
 def _init_db():
     """
-    Lazy init. No rompe arranque si falta DATABASE_URL.
-    Crea tablas (catálogo/claims) en primer uso.
-    Intenta crear índice útil para PostGIS (si la extensión está habilitada).
+    Lazy init:
+    - crea tablas al primer uso
+    - intenta crear índice espacial funcional (PostGIS) de forma segura
     """
     global _engine, _SessionLocal, _inited
     if _inited or not _DB_URL:
@@ -154,13 +158,16 @@ def _init_db():
 
     Base.metadata.create_all(bind=_engine)
 
-    # Índice espacial funcional opcional (no rompe si PostGIS no está habilitado)
+    # Índice espacial funcional (PARCIAL) para evitar GeoJSON inválido:
+    # - solo indexa cuando geom_json está presente y NO es JSON null.
+    # - si PostGIS no está habilitado, fallará, pero no rompemos el arranque.
     try:
         with _engine.begin() as conn:
             conn.exec_driver_sql("""
             CREATE INDEX IF NOT EXISTS app_insignia_geom_gix
             ON app_insignia
-            USING GIST ((ST_SetSRID(ST_GeomFromGeoJSON(geom_json::text), 4326)));
+            USING GIST ((ST_SetSRID(ST_GeomFromGeoJSON(geom_json::text), 4326)))
+            WHERE geom_json IS NOT NULL AND geom_json::text <> 'null';
             """)
     except Exception:
         pass
@@ -218,6 +225,7 @@ def _count_visits_in_polygon(db: Session, uid: int, codigo_base: Optional[str], 
     geom_str = json.dumps(geom_json)
     from_dt = (_now() - dt.timedelta(days=days)) if days else None
 
+    # PostGIS requerido
     sql = """
     SELECT COUNT(*)
     FROM app_visita v
@@ -230,10 +238,13 @@ def _count_visits_in_polygon(db: Session, uid: int, codigo_base: Optional[str], 
             ST_SetSRID(ST_MakePoint(v.lng, v.lat), 4326)
           );
     """
-    row = db.execute(
-        text(sql),
-        {"uid": uid, "codigo_base": codigo_base, "from_dt": from_dt, "geom": geom_str},
-    ).scalar_one()
+    try:
+        row = db.execute(
+            text(sql),
+            {"uid": uid, "codigo_base": codigo_base, "from_dt": from_dt, "geom": geom_str},
+        ).scalar_one()
+    except Exception as e:
+        raise HTTPException(500, f"Error PostGIS/GeoJSON al verificar polígono: {e}")
     return int(row)
 
 
@@ -249,7 +260,6 @@ def _already_claimed(db: Session, uid: int, insignia_id: int) -> Optional[Insign
 def _bbox_from_geojson(geom_json: dict) -> Optional[dict]:
     """
     Calcula bbox {minLat,minLng,maxLat,maxLng} desde GeoJSON Polygon/MultiPolygon.
-    (Útil para que el cliente filtre rápido).
     """
     if not isinstance(geom_json, dict):
         return None
@@ -265,7 +275,7 @@ def _bbox_from_geojson(geom_json: dict) -> Optional[dict]:
         for pt in ring:
             if not isinstance(pt, (list, tuple)) or len(pt) < 2:
                 continue
-            lng, lat = pt[0], pt[1]  # GeoJSON: [lng,lat]
+            lng, lat = pt[0], pt[1]
             try:
                 lngs.append(float(lng))
                 lats.append(float(lat))
@@ -275,7 +285,7 @@ def _bbox_from_geojson(geom_json: dict) -> Optional[dict]:
     if t == "Polygon":
         for ring in coords:
             add_ring(ring)
-    else:  # MultiPolygon
+    else:
         for poly in coords:
             for ring in poly:
                 add_ring(ring)
@@ -306,7 +316,6 @@ class InsigniaOut(BaseModel):
     geom_json: Optional[dict] = None
     bbox: Optional[dict] = None
 
-    # estado del usuario
     claimed: bool = False
     claim_status: Optional[str] = None
     claimed_at: Optional[dt.datetime] = None
@@ -333,22 +342,18 @@ class ClaimResp(BaseModel):
     reason: Optional[str] = None
 
 
-# Admin create/update payloads
 class InsigniaCreate(BaseModel):
     codigo_base: Optional[str] = Field(default=None, max_length=64)
     tipo: InsigniaType
 
-    # UI
     titulo: Optional[str] = Field(default=None, max_length=160)
     image_url: Optional[str] = Field(default="", max_length=600)
     orden: int = 0
     activa: bool = True
 
-    # reglas
     requisitos: dict = Field(default_factory=dict)
     display: dict = Field(default_factory=dict)
 
-    # geo
     geom_json: Optional[dict] = None
     bbox: Optional[dict] = None
 
@@ -376,7 +381,7 @@ def catalogo(
     db: Session = Depends(get_db),
     uid: int = Depends(_current_user_id),
     codigo_base: Optional[str] = Query(None, max_length=64),
-    include_inactive: bool = Query(False, description="Si true, incluye insignias inactivas (debug)"),
+    include_inactive: bool = Query(False),
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -448,14 +453,7 @@ def reclamar(
 ):
     prev = _already_claimed(db, uid, insignia_id)
     if prev:
-        return ClaimResp(
-            ok=True,
-            claimed=True,
-            status=prev.status,
-            required_visits=0,
-            counted_visits=0,
-            reason="Ya estaba reclamada",
-        )
+        return ClaimResp(ok=True, claimed=True, status=prev.status, required_visits=0, counted_visits=0, reason="Ya estaba reclamada")
 
     ins = db.get(Insignia, insignia_id)
     if not ins or not ins.activa:
@@ -466,31 +464,17 @@ def reclamar(
 
     if ins.tipo == "COUNT_TOTAL":
         counted = _count_visits_total(db, uid, ins.codigo_base, days)
-
     elif ins.tipo == "COUNT_IN_POLYGON":
         if not ins.geom_json:
             raise HTTPException(500, "Insignia geográfica mal configurada (falta geom_json)")
         counted = _count_visits_in_polygon(db, uid, ins.codigo_base, days, ins.geom_json)
-
     else:
         raise HTTPException(400, f"Tipo de insignia no soportado aún: {ins.tipo}")
 
     if counted < req:
-        return ClaimResp(
-            ok=True,
-            claimed=False,
-            status="locked",
-            required_visits=req,
-            counted_visits=counted,
-            reason="Aún no cumples los requisitos",
-        )
+        return ClaimResp(ok=True, claimed=False, status="locked", required_visits=req, counted_visits=counted, reason="Aún no cumples los requisitos")
 
-    claim = InsigniaClaim(
-        user_id=uid,
-        insignia_id=insignia_id,
-        status="claimed",
-        evidence=payload.evidence or {},
-    )
+    claim = InsigniaClaim(user_id=uid, insignia_id=insignia_id, status="claimed", evidence=payload.evidence or {})
     db.add(claim)
     try:
         db.commit()
@@ -498,48 +482,10 @@ def reclamar(
         db.rollback()
         return ClaimResp(ok=True, claimed=True, status="claimed", required_visits=req, counted_visits=counted, reason="Reclamada (race)")
     db.refresh(claim)
-
     return ClaimResp(ok=True, claimed=True, status=claim.status, required_visits=req, counted_visits=counted)
 
 
 # -------------------- Admin endpoints --------------------
-# Nota: Por seguridad, todo admin requiere ADMIN_USER_IDS
-
-@router.get("/admin/list", response_model=CatalogOut)
-def admin_list(
-    db: Session = Depends(get_db),
-    uid: int = Depends(_current_user_id),
-    codigo_base: Optional[str] = Query(None, max_length=64),
-    include_inactive: bool = Query(True),
-    limit: int = Query(500, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
-):
-    _require_admin(uid)
-    # reusamos la misma salida, pero sin claims (claimed=false)
-    conds = []
-    if codigo_base:
-        conds.append(Insignia.codigo_base == codigo_base)
-    if not include_inactive:
-        conds.append(Insignia.activa == True)  # noqa: E712
-
-    base_q = select(Insignia).where(and_(*conds)).order_by(Insignia.orden.asc(), Insignia.id.asc())
-    total = int(db.execute(select(func.count()).select_from(base_q.subquery())).scalar_one())
-    items = db.execute(base_q.limit(limit).offset(offset)).scalars().all()
-
-    out = [
-        InsigniaOut(
-            **{k: getattr(it, k) for k in [
-                "id","codigo_base","tipo","titulo","image_url","orden","activa",
-                "requisitos","display","geom_json","bbox"
-            ]},
-            claimed=False,
-            claim_status=None,
-            claimed_at=None,
-        )
-        for it in items
-    ]
-    return CatalogOut(items=out, total=total)
-
 
 @router.post("/admin", response_model=InsigniaOut)
 def admin_crear(
@@ -551,8 +497,15 @@ def admin_crear(
 
     geom = payload.geom_json
     bbox = payload.bbox
-    if geom and not bbox:
-        bbox = _bbox_from_geojson(geom)
+
+    if payload.tipo == "COUNT_IN_POLYGON":
+        if not geom:
+            raise HTTPException(400, "Para COUNT_IN_POLYGON debes enviar geom_json")
+        if not bbox:
+            bbox = _bbox_from_geojson(geom)
+    else:
+        geom = None
+        bbox = None
 
     ins = Insignia(
         codigo_base=(payload.codigo_base or None),
@@ -567,13 +520,16 @@ def admin_crear(
         bbox=bbox,
     )
     db.add(ins)
-    db.flush()  # ya tenemos id
+    db.flush()
 
-    # título autogenerado si viene vacío
     if not ins.titulo:
         ins.titulo = f"Insignia {ins.id}"
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(400, f"No se pudo crear insignia: {e}")
     db.refresh(ins)
 
     return InsigniaOut(
@@ -585,8 +541,41 @@ def admin_crear(
     )
 
 
+def _apply_update(ins: Insignia, payload: InsigniaUpdate):
+    if payload.codigo_base is not None:
+        ins.codigo_base = payload.codigo_base or None
+    if payload.tipo is not None:
+        ins.tipo = payload.tipo
+
+    if payload.titulo is not None:
+        ins.titulo = payload.titulo.strip()
+    if payload.image_url is not None:
+        ins.image_url = (payload.image_url or "").strip()
+    if payload.orden is not None:
+        ins.orden = int(payload.orden)
+    if payload.activa is not None:
+        ins.activa = bool(payload.activa)
+
+    if payload.requisitos is not None:
+        ins.requisitos = payload.requisitos
+    if payload.display is not None:
+        ins.display = payload.display
+
+    if payload.geom_json is not None:
+        ins.geom_json = payload.geom_json
+        if payload.bbox is None and payload.geom_json:
+            ins.bbox = _bbox_from_geojson(payload.geom_json)
+
+    if payload.bbox is not None:
+        ins.bbox = payload.bbox
+
+    if ins.tipo != "COUNT_IN_POLYGON":
+        ins.geom_json = None
+        ins.bbox = None
+
+
 @router.patch("/admin/{insignia_id:int}", response_model=InsigniaOut)
-def admin_actualizar(
+def admin_actualizar_patch(
     insignia_id: int,
     payload: InsigniaUpdate,
     db: Session = Depends(get_db),
@@ -598,36 +587,12 @@ def admin_actualizar(
     if not ins:
         raise HTTPException(404, "Insignia no encontrada")
 
-    # campos simples
-    if payload.codigo_base is not None:
-        ins.codigo_base = payload.codigo_base or None
-    if payload.tipo is not None:
-        ins.tipo = payload.tipo
-    if payload.titulo is not None:
-        ins.titulo = payload.titulo.strip()
-    if payload.image_url is not None:
-        ins.image_url = (payload.image_url or "").strip()
-    if payload.orden is not None:
-        ins.orden = int(payload.orden)
-    if payload.activa is not None:
-        ins.activa = bool(payload.activa)
-
-    # jsonb (reemplazo completo si viene)
-    if payload.requisitos is not None:
-        ins.requisitos = payload.requisitos
-    if payload.display is not None:
-        ins.display = payload.display
-
-    # geo
-    if payload.geom_json is not None:
-        ins.geom_json = payload.geom_json
-        # si no mandan bbox, lo recalculamos
-        if payload.bbox is None and payload.geom_json:
-            ins.bbox = _bbox_from_geojson(payload.geom_json)
-    if payload.bbox is not None:
-        ins.bbox = payload.bbox
-
-    db.commit()
+    _apply_update(ins, payload)
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(400, f"No se pudo actualizar: {e}")
     db.refresh(ins)
 
     return InsigniaOut(
@@ -639,16 +604,23 @@ def admin_actualizar(
     )
 
 
+# Wrapper POST para tu ApiClient (no tiene patch)
+@router.post("/admin/{insignia_id:int}", response_model=InsigniaOut)
+def admin_actualizar_post(
+    insignia_id: int,
+    payload: InsigniaUpdate,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    return admin_actualizar_patch(insignia_id, payload, db, uid)
+
+
 @router.delete("/admin/{insignia_id:int}")
 def admin_delete(
     insignia_id: int,
     db: Session = Depends(get_db),
     uid: int = Depends(_current_user_id),
 ):
-    """
-    Soft delete: desactiva la insignia (no borra fila).
-    Esto evita romper claims existentes.
-    """
     _require_admin(uid)
 
     ins = db.get(Insignia, insignia_id)
@@ -656,7 +628,6 @@ def admin_delete(
         raise HTTPException(404, "Insignia no encontrada")
 
     ins.activa = False
-    # opcional: marca en display que está borrada para tooling interno
     try:
         d = ins.display or {}
         d["deleted"] = True
@@ -666,3 +637,13 @@ def admin_delete(
 
     db.commit()
     return {"ok": True, "deleted": True, "soft": True, "id": insignia_id}
+
+
+# Wrapper POST para tu ApiClient (no tiene delete)
+@router.post("/admin/{insignia_id:int}/delete")
+def admin_delete_post(
+    insignia_id: int,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    return admin_delete(insignia_id, db, uid)
