@@ -261,6 +261,9 @@ class PostOut(BaseModel):
     repost_count: int
     my_reaction: Optional[str] = None
 
+    # NUEVO: desglose de reacciones (para UI)
+    reaction_breakdown: Dict[str, int] = {}
+
     created_at: dt.datetime
 
     # NUEVO: 2 comentarios por defecto en feed
@@ -308,6 +311,7 @@ def _post_out(
     p: Post,
     my_reaction_type: Optional[int],
     repost_preview: Optional[Dict[str, Any]],
+    reaction_breakdown: Optional[Dict[str, int]] = None,
     comments_preview: Optional[List[CommentPreviewOut]] = None,
 ) -> PostOut:
     author = _author_out(db, int(p.user_id))
@@ -331,6 +335,7 @@ def _post_out(
         comment_count=int(p.comment_count or 0),
         repost_count=int(p.repost_count or 0),
         my_reaction=_reaction_to_str(my_reaction_type),
+        reaction_breakdown=reaction_breakdown or {},
         created_at=p.created_at,
         comments_preview=comments_preview or [],
     )
@@ -382,7 +387,20 @@ def get_feed(
                 "created_at": o.created_at.isoformat() if o.created_at else None,
             }
 
-    # -------------------- comments_preview: top 2 comments per post --------------------
+    # reaction_breakdown: count por tipo para estos posts
+    rrows = db.execute(
+        select(PostReaction.post_id, PostReaction.type, func.count().label("cnt"))
+        .where(PostReaction.post_id.in_(post_ids))
+        .group_by(PostReaction.post_id, PostReaction.type)
+    ).all()
+    reaction_map: Dict[int, Dict[str, int]] = {pid: {} for pid in post_ids}
+    for r in rrows:
+        pid = int(r.post_id)
+        t = _reaction_to_str(int(r.type))
+        if t:
+            reaction_map[pid][t] = int(r.cnt)
+
+    # comments_preview: top 2 comments per post
     comments_preview_map: Dict[int, List[CommentPreviewOut]] = {pid: [] for pid in post_ids}
 
     csub = (
@@ -447,6 +465,7 @@ def get_feed(
                 p=p,
                 my_reaction_type=myr_map.get(p.id),
                 repost_preview=preview,
+                reaction_breakdown=reaction_map.get(p.id, {}),
                 comments_preview=comments_preview_map.get(p.id, []),
             )
         )
@@ -524,7 +543,7 @@ def create_post(body: PostCreateIn, token: str = Depends(oauth2), db: Session = 
                 "created_at": o.created_at.isoformat() if o.created_at else None,
             }
 
-    return _post_out(db, p, None, preview, comments_preview=[])
+    return _post_out(db, p, None, preview, reaction_breakdown={}, comments_preview=[])
 
 @router.get("/posts/{public_id}", response_model=PostOut)
 def get_post(public_id: str, token: str = Depends(oauth2), db: Session = Depends(get_db)):
@@ -549,7 +568,19 @@ def get_post(public_id: str, token: str = Depends(oauth2), db: Session = Depends
                 "created_at": o.created_at.isoformat() if o.created_at else None,
             }
 
-    return _post_out(db, p, myr_type, preview, comments_preview=[])
+    # reaction_breakdown for this post
+    rrows = db.execute(
+        select(PostReaction.type, func.count().label("cnt"))
+        .where(PostReaction.post_id == p.id)
+        .group_by(PostReaction.type)
+    ).all()
+    reaction_breakdown: Dict[str, int] = {}
+    for r in rrows:
+        t = _reaction_to_str(int(r.type))
+        if t:
+            reaction_breakdown[t] = int(r.cnt)
+
+    return _post_out(db, p, myr_type, preview, reaction_breakdown=reaction_breakdown, comments_preview=[])
 
 @router.patch("/posts/{public_id}", response_model=PostOut)
 def edit_post(public_id: str, body: PostCreateIn, token: str = Depends(oauth2), db: Session = Depends(get_db)):
@@ -569,7 +600,7 @@ def edit_post(public_id: str, body: PostCreateIn, token: str = Depends(oauth2), 
     db.refresh(p)
 
     myr = db.query(PostReaction).filter(PostReaction.post_id == p.id, PostReaction.user_id == uid).first()
-    return _post_out(db, p, (myr.type if myr else None), repost_preview=None, comments_preview=[])
+    return _post_out(db, p, (myr.type if myr else None), repost_preview=None, reaction_breakdown={}, comments_preview=[])
 
 @router.delete("/posts/{public_id}")
 def delete_post(public_id: str, token: str = Depends(oauth2), db: Session = Depends(get_db)):
