@@ -25,22 +25,10 @@ from sqlalchemy import (
     Index,
     func,
     and_,
+    select,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, Session
-
-# Rutas (montadas en /api/v1):
-#   GET  /feed
-#   POST /posts
-#   GET  /posts/{public_id}
-#   PATCH /posts/{public_id}            (solo texto)
-#   DELETE /posts/{public_id}           (soft delete)
-#   POST /posts/{public_id}/react
-#   GET  /posts/{public_id}/comments
-#   POST /posts/{public_id}/comments
-#   GET  /comments/{comment_public_id}/replies
-#   POST /comments/{comment_public_id}/reply
-#   POST /comments/{comment_public_id}/react
 
 router = APIRouter(tags=["posts"])
 
@@ -56,7 +44,7 @@ oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/finalize")
 
 # -------------------- Bases --------------------
 class BaseOwn(DeclarativeBase):
-    """Solo tablas propias de este snippet."""
+    """Tablas propias de este snippet."""
     pass
 
 class BaseRO(DeclarativeBase):
@@ -94,7 +82,7 @@ def _init_db():
     _engine = create_engine(url, pool_pre_ping=True)
     _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 
-    # Crea SOLO las tablas propias
+    # Crea SOLO tablas propias
     BaseOwn.metadata.create_all(bind=_engine)
     _inited = True
 
@@ -240,6 +228,13 @@ class MediaItem(BaseModel):
     duration: Optional[float] = None
     thumb_object_name: Optional[str] = None
 
+class CommentPreviewOut(BaseModel):
+    public_id: str
+    user_id: int
+    author: AuthorOut
+    text: str
+    created_at: dt.datetime
+
 class PostCreateIn(BaseModel):
     text: Optional[str] = None
     codigo_base: Optional[str] = None
@@ -251,6 +246,7 @@ class PostOut(BaseModel):
     public_id: str
     user_id: int
     author: AuthorOut
+
     codigo_base: Optional[str] = None
     visibility: int
     status: int
@@ -266,6 +262,9 @@ class PostOut(BaseModel):
     my_reaction: Optional[str] = None
 
     created_at: dt.datetime
+
+    # NUEVO: 2 comentarios por defecto en feed
+    comments_preview: List[CommentPreviewOut] = []
 
 class FeedOut(BaseModel):
     items: List[PostOut]
@@ -304,8 +303,15 @@ def _author_out(db: Session, uid: int) -> AuthorOut:
     u = db.query(User).filter(User.id == uid).first()
     return AuthorOut(id=uid, nombre_completo=_full_name(u), telefono=(u.telefono if u else None))
 
-def _post_out(db: Session, p: Post, my_reaction_type: Optional[int], repost_preview: Optional[Dict[str, Any]]) -> PostOut:
+def _post_out(
+    db: Session,
+    p: Post,
+    my_reaction_type: Optional[int],
+    repost_preview: Optional[Dict[str, Any]],
+    comments_preview: Optional[List[CommentPreviewOut]] = None,
+) -> PostOut:
     author = _author_out(db, int(p.user_id))
+
     media = None
     if isinstance(p.media_json, list):
         media = [MediaItem(**x) for x in p.media_json]  # type: ignore
@@ -326,6 +332,7 @@ def _post_out(db: Session, p: Post, my_reaction_type: Optional[int], repost_prev
         repost_count=int(p.repost_count or 0),
         my_reaction=_reaction_to_str(my_reaction_type),
         created_at=p.created_at,
+        comments_preview=comments_preview or [],
     )
 
 # -------------------- Endpoints --------------------
@@ -353,9 +360,14 @@ def get_feed(
         return FeedOut(items=[], next_before_id=None)
 
     post_ids = [p.id for p in posts]
-    my_reacts = db.query(PostReaction).filter(and_(PostReaction.user_id == uid, PostReaction.post_id.in_(post_ids))).all()
+
+    # My reactions (batch)
+    my_reacts = db.query(PostReaction).filter(
+        and_(PostReaction.user_id == uid, PostReaction.post_id.in_(post_ids))
+    ).all()
     myr_map = {r.post_id: r.type for r in my_reacts}
 
+    # Repost previews (batch)
     repost_ids = [p.repost_post_id for p in posts if p.repost_post_id]
     repost_preview_map: Dict[int, Dict[str, Any]] = {}
     if repost_ids:
@@ -370,10 +382,74 @@ def get_feed(
                 "created_at": o.created_at.isoformat() if o.created_at else None,
             }
 
-    items = []
+    # -------------------- comments_preview: top 2 comments per post --------------------
+    comments_preview_map: Dict[int, List[CommentPreviewOut]] = {pid: [] for pid in post_ids}
+
+    csub = (
+        select(
+            Comment.public_id.label("public_id"),
+            Comment.post_id.label("post_id"),
+            Comment.user_id.label("user_id"),
+            Comment.text.label("text"),
+            Comment.created_at.label("created_at"),
+            func.row_number()
+                .over(partition_by=Comment.post_id, order_by=Comment.id.desc())
+                .label("rn"),
+        )
+        .where(
+            Comment.post_id.in_(post_ids),
+            Comment.status == 1,
+            Comment.parent_comment_id.is_(None),
+        )
+        .subquery()
+    )
+
+    rows = db.execute(
+        select(
+            csub.c.public_id,
+            csub.c.post_id,
+            csub.c.user_id,
+            csub.c.text,
+            csub.c.created_at,
+        )
+        .where(csub.c.rn <= 2)
+        .order_by(csub.c.post_id, csub.c.created_at.desc())
+    ).all()
+
+    preview_user_ids = list({int(r.user_id) for r in rows}) if rows else []
+    preview_users = db.query(User).filter(User.id.in_(preview_user_ids)).all() if preview_user_ids else []
+    preview_user_map = {u.id: u for u in preview_users}
+
+    for r in rows:
+        u = preview_user_map.get(int(r.user_id))
+        author = AuthorOut(
+            id=int(r.user_id),
+            nombre_completo=_full_name(u) if u else "",
+            telefono=u.telefono if u else None,
+        )
+        comments_preview_map[int(r.post_id)].append(
+            CommentPreviewOut(
+                public_id=str(r.public_id),
+                user_id=int(r.user_id),
+                author=author,
+                text=str(r.text),
+                created_at=r.created_at,
+            )
+        )
+
+    # Build response
+    items: List[PostOut] = []
     for p in posts:
         preview = repost_preview_map.get(p.repost_post_id) if p.repost_post_id else None
-        items.append(_post_out(db, p, myr_map.get(p.id), preview))
+        items.append(
+            _post_out(
+                db=db,
+                p=p,
+                my_reaction_type=myr_map.get(p.id),
+                repost_preview=preview,
+                comments_preview=comments_preview_map.get(p.id, []),
+            )
+        )
 
     return FeedOut(items=items, next_before_id=int(posts[-1].id))
 
@@ -448,7 +524,7 @@ def create_post(body: PostCreateIn, token: str = Depends(oauth2), db: Session = 
                 "created_at": o.created_at.isoformat() if o.created_at else None,
             }
 
-    return _post_out(db, p, None, preview)
+    return _post_out(db, p, None, preview, comments_preview=[])
 
 @router.get("/posts/{public_id}", response_model=PostOut)
 def get_post(public_id: str, token: str = Depends(oauth2), db: Session = Depends(get_db)):
@@ -473,7 +549,7 @@ def get_post(public_id: str, token: str = Depends(oauth2), db: Session = Depends
                 "created_at": o.created_at.isoformat() if o.created_at else None,
             }
 
-    return _post_out(db, p, myr_type, preview)
+    return _post_out(db, p, myr_type, preview, comments_preview=[])
 
 @router.patch("/posts/{public_id}", response_model=PostOut)
 def edit_post(public_id: str, body: PostCreateIn, token: str = Depends(oauth2), db: Session = Depends(get_db)):
@@ -493,7 +569,7 @@ def edit_post(public_id: str, body: PostCreateIn, token: str = Depends(oauth2), 
     db.refresh(p)
 
     myr = db.query(PostReaction).filter(PostReaction.post_id == p.id, PostReaction.user_id == uid).first()
-    return _post_out(db, p, (myr.type if myr else None), None)
+    return _post_out(db, p, (myr.type if myr else None), repost_preview=None, comments_preview=[])
 
 @router.delete("/posts/{public_id}")
 def delete_post(public_id: str, token: str = Depends(oauth2), db: Session = Depends(get_db)):
@@ -554,7 +630,11 @@ def list_comments(
     if not p:
         raise HTTPException(404, "Post no encontrado.")
 
-    q = db.query(Comment).filter(Comment.post_id == p.id, Comment.status == 1, Comment.parent_comment_id.is_(None))
+    q = db.query(Comment).filter(
+        Comment.post_id == p.id,
+        Comment.status == 1,
+        Comment.parent_comment_id.is_(None),
+    )
     if before_id:
         q = q.filter(Comment.id < before_id)
 
@@ -563,7 +643,9 @@ def list_comments(
         return CommentsOut(items=[], next_before_id=None)
 
     cids = [c.id for c in items]
-    myrs = db.query(CommentReaction).filter(and_(CommentReaction.user_id == uid, CommentReaction.comment_id.in_(cids))).all()
+    myrs = db.query(CommentReaction).filter(
+        and_(CommentReaction.user_id == uid, CommentReaction.comment_id.in_(cids))
+    ).all()
     myr_map = {r.comment_id: r.type for r in myrs}
 
     out = []
@@ -648,7 +730,9 @@ def list_replies(
         return CommentsOut(items=[], next_before_id=None)
 
     rids = [r.id for r in items]
-    myrs = db.query(CommentReaction).filter(and_(CommentReaction.user_id == uid, CommentReaction.comment_id.in_(rids))).all()
+    myrs = db.query(CommentReaction).filter(
+        and_(CommentReaction.user_id == uid, CommentReaction.comment_id.in_(rids))
+    ).all()
     myr_map = {r.comment_id: r.type for r in myrs}
 
     out = []
