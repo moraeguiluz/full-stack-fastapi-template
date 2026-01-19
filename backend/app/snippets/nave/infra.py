@@ -344,7 +344,7 @@ def get_agent_script():
         "if __name__ == \"__main__\":",
         "    main()",
     ]
-    return \"\\n\".join(lines)
+    return "\n".join(lines)
 
 
 @router.post("/agents/bootstrap", response_model=AgentBootstrapOut)
