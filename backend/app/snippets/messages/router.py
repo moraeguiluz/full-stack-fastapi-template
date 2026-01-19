@@ -6,7 +6,7 @@ from typing import Optional
 import jwt
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy import select, case, or_, and_, func
+from sqlalchemy import select, case, or_, and_, func, update
 from sqlalchemy.orm import Session
 
 from .db import get_db, now_utc
@@ -128,6 +128,21 @@ def list_threads(db: Session = Depends(get_db), token: str = Depends(oauth2)) ->
         .order_by(MessageThread.last_message_at.desc().nullslast(), MessageThread.updated_at.desc())
     )
     threads = db.execute(stmt).scalars().all()
+
+    thread_ids = [t.id for t in threads]
+    if thread_ids:
+        now = now_utc()
+        delivered_stmt = (
+            update(Message)
+            .where(
+                Message.thread_id.in_(thread_ids),
+                Message.sender_id != user_id,
+                Message.delivered_at.is_(None),
+            )
+            .values(delivered_at=now)
+        )
+        db.execute(delivered_stmt)
+        db.commit()
 
     group_counts = {}
     group_ids = [t.id for t in threads if t.is_group]
