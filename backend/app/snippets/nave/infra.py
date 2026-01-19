@@ -82,7 +82,7 @@ mkdir -p /opt/nave
 curl -fsSL "{api_base}/nave/infra/agent.py" -o /opt/nave/agent.py
 chmod +x /opt/nave/agent.py
 PUBLIC_IP=$(curl -s https://ifconfig.me || true)
-WAN_IF=$(ip route | awk '/default/ {print $5; exit}')
+WAN_IF=$(ip route | awk '/default/ {{print $5; exit}}')
 iptables -t nat -A POSTROUTING -o "${WAN_IF}" -j MASQUERADE
 iptables -A FORWARD -i wg0 -j ACCEPT
 iptables -A FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
