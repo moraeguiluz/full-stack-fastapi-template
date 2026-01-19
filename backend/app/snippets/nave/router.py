@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import get_db
+from . import infra
 from .models import NaveProfile
 from .schemas import (
     ProfileListOut,
@@ -24,6 +25,9 @@ _SECRET = os.getenv("SECRET_KEY", "dev-change-me")
 _ALG = "HS256"
 
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/finalize")
+
+# include infra endpoints under /api/v1/nave/infra
+router.include_router(infra.router)
 
 
 def _decode_uid(token: str) -> int:
