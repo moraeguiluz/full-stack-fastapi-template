@@ -106,6 +106,7 @@ class Insignia(Base):
 
     titulo: Mapped[str] = mapped_column(String(160), default="")
     image_url: Mapped[str] = mapped_column(String(600), default="")
+    image_object_name: Mapped[Optional[str]] = mapped_column(String(600), nullable=True)
     orden: Mapped[int] = mapped_column(Integer, default=0, index=True)
     activa: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
@@ -157,6 +158,16 @@ def _init_db():
     _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 
     Base.metadata.create_all(bind=_engine)
+
+    # Asegura columna nueva para object storage (sin migraciones externas).
+    try:
+        with _engine.begin() as conn:
+            conn.exec_driver_sql("""
+            ALTER TABLE app_insignia
+            ADD COLUMN IF NOT EXISTS image_object_name VARCHAR(600);
+            """)
+    except Exception:
+        pass
 
     # Índice espacial funcional (PARCIAL) para evitar GeoJSON inválido:
     # - solo indexa cuando geom_json está presente y NO es JSON null.
@@ -309,6 +320,7 @@ class InsigniaOut(BaseModel):
     tipo: str
     titulo: str
     image_url: str
+    image_object_name: Optional[str] = None
     orden: int
     activa: bool
     requisitos: dict = Field(default_factory=dict)
@@ -348,6 +360,7 @@ class InsigniaCreate(BaseModel):
 
     titulo: Optional[str] = Field(default=None, max_length=160)
     image_url: Optional[str] = Field(default="", max_length=600)
+    image_object_name: Optional[str] = Field(default=None, max_length=600)
     orden: int = 0
     activa: bool = True
 
@@ -364,6 +377,7 @@ class InsigniaUpdate(BaseModel):
 
     titulo: Optional[str] = Field(default=None, max_length=160)
     image_url: Optional[str] = Field(default=None, max_length=600)
+    image_object_name: Optional[str] = Field(default=None, max_length=600)
     orden: Optional[int] = None
     activa: Optional[bool] = None
 
@@ -411,7 +425,7 @@ def catalogo(
         c = claims.get(it.id)
         out.append(InsigniaOut(
             **{k: getattr(it, k) for k in [
-                "id","codigo_base","tipo","titulo","image_url","orden","activa",
+                "id","codigo_base","tipo","titulo","image_url","image_object_name","orden","activa",
                 "requisitos","display","geom_json","bbox"
             ]},
             claimed=bool(c),
@@ -435,7 +449,7 @@ def detalle_insignia(
     c = _already_claimed(db, uid, insignia_id)
     return InsigniaOut(
         **{k: getattr(ins, k) for k in [
-            "id","codigo_base","tipo","titulo","image_url","orden","activa",
+            "id","codigo_base","tipo","titulo","image_url","image_object_name","orden","activa",
             "requisitos","display","geom_json","bbox"
         ]},
         claimed=bool(c),
@@ -512,6 +526,7 @@ def admin_crear(
         tipo=payload.tipo,
         titulo=(payload.titulo or "").strip(),
         image_url=(payload.image_url or "").strip(),
+        image_object_name=(payload.image_object_name or None),
         orden=payload.orden,
         activa=payload.activa,
         requisitos=payload.requisitos or {},
@@ -534,7 +549,7 @@ def admin_crear(
 
     return InsigniaOut(
         **{k: getattr(ins, k) for k in [
-            "id","codigo_base","tipo","titulo","image_url","orden","activa",
+            "id","codigo_base","tipo","titulo","image_url","image_object_name","orden","activa",
             "requisitos","display","geom_json","bbox"
         ]},
         claimed=False,
@@ -551,6 +566,8 @@ def _apply_update(ins: Insignia, payload: InsigniaUpdate):
         ins.titulo = payload.titulo.strip()
     if payload.image_url is not None:
         ins.image_url = (payload.image_url or "").strip()
+    if payload.image_object_name is not None:
+        ins.image_object_name = (payload.image_object_name or "").strip() or None
     if payload.orden is not None:
         ins.orden = int(payload.orden)
     if payload.activa is not None:
@@ -597,7 +614,7 @@ def admin_actualizar_patch(
 
     return InsigniaOut(
         **{k: getattr(ins, k) for k in [
-            "id","codigo_base","tipo","titulo","image_url","orden","activa",
+            "id","codigo_base","tipo","titulo","image_url","image_object_name","orden","activa",
             "requisitos","display","geom_json","bbox"
         ]},
         claimed=False,
