@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+import secrets
+from typing import Optional, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.security import OAuth2PasswordBearer
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .gcp_client import (
     defaults,
@@ -13,11 +17,27 @@ from .gcp_client import (
     create_instance,
     get_address,
     get_instance,
+    get_firewall,
+    create_firewall_rule,
+)
+from .db import get_db, now_utc
+from .models import NaveExit
+from .schemas import (
+    AgentBootstrapIn,
+    AgentBootstrapOut,
+    AgentRegisterIn,
+    AgentDesiredIn,
+    AgentDesiredOut,
+    AgentStatusIn,
+    AgentStatusOut,
+    ProvisionIn,
+    ProvisionOut,
 )
 
 router = APIRouter(prefix="/infra", tags=["nave-infra"])
 
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/finalize")
+_API_BASE = "https://api.bonube.com/api/v1"
 
 
 class AddressCreateIn(BaseModel):
@@ -45,6 +65,73 @@ def _ensure_name(name: str) -> None:
 def _auth(_token: str = Depends(oauth2)) -> None:
     # Placeholder: usa el mismo auth que el resto (token requerido).
     return None
+
+
+def _startup_script(api_base: str, agent_id: int, token: str, vm_name: str) -> str:
+    api_base = api_base.rstrip("/")
+    safe_name = vm_name.replace("\"", "")
+    return f"""#!/usr/bin/env bash
+set -e
+apt-get update
+apt-get install -y wireguard curl python3
+echo "net.ipv4.ip_forward=1" >/etc/sysctl.d/99-nave.conf
+sysctl -p /etc/sysctl.d/99-nave.conf
+mkdir -p /opt/nave
+curl -fsSL "{api_base}/nave/infra/agent.py" -o /opt/nave/agent.py
+chmod +x /opt/nave/agent.py
+PUBLIC_IP=$(curl -s https://ifconfig.me || true)
+cat >/etc/systemd/system/nave-agent.service <<'SERVICE'
+[Unit]
+Description=Nave Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment="NAVE_API_BASE={api_base}"
+Environment="NAVE_AGENT_TOKEN={token}"
+Environment="NAVE_AGENT_ID={agent_id}"
+Environment="NAVE_VM_NAME={safe_name}"
+Environment="NAVE_PUBLIC_IP=${{PUBLIC_IP}}"
+ExecStart=/usr/bin/env python3 /opt/nave/agent.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+systemctl daemon-reload
+systemctl enable --now nave-agent
+"""
+
+
+def _create_agent(db: Session, profile_id: Optional[int], name: Optional[str]) -> NaveExit:
+    token = secrets.token_urlsafe(32)
+    agent = NaveExit(
+        profile_id=profile_id,
+        vm_name=name,
+        agent_token=token,
+        desired_json=None,
+        status_json=None,
+        last_seen_at=None,
+    )
+    db.add(agent)
+    db.commit()
+    db.refresh(agent)
+    return agent
+
+
+def _agent_from_token(
+    db: Session, agent_id: int, token: str | None
+) -> NaveExit:
+    if not token:
+        raise HTTPException(401, "Token de agente requerido")
+    stmt = select(NaveExit).where(NaveExit.id == agent_id, NaveExit.agent_token == token)
+    agent = db.execute(stmt).scalar_one_or_none()
+    if not agent:
+        raise HTTPException(401, "Agente invalido")
+    return agent
 
 
 @router.get("/defaults")
@@ -83,3 +170,224 @@ def create_vm(inp: InstanceCreateIn, _=Depends(_auth)):
         disk_size_gb=inp.disk_size_gb,
         preemptible=inp.preemptible,
     )
+
+
+@router.post("/provision", response_model=ProvisionOut)
+def provision_vm(
+    inp: ProvisionIn,
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ProvisionOut:
+    _ensure_name(inp.name)
+    address_name = inp.address_name or f"{inp.name}-ip"
+    _ensure_name(address_name)
+
+    agent = _create_agent(db, inp.profile_id, inp.name)
+    script = _startup_script(_API_BASE, agent.id, agent.agent_token, inp.name)
+
+    tags = ["nave-wg"]
+    try:
+        get_firewall("nave-wg-udp-51820")
+    except HTTPException as err:
+        if err.status_code != 404:
+            raise
+        create_firewall_rule(
+            "nave-wg-udp-51820",
+            target_tags=tags,
+            allowed=[{"IPProtocol": "udp", "ports": ["51820"]}],
+            description="Nave WireGuard UDP 51820",
+        )
+
+    if inp.create_ip:
+        create_address(address_name, description=f"nave:{inp.name}")
+
+    instance = create_instance(
+        name=inp.name,
+        address_name=address_name,
+        machine_type=inp.machine_type,
+        startup_script=script,
+        tags=tags,
+        disk_size_gb=inp.disk_size_gb,
+        preemptible=inp.preemptible,
+    )
+
+    return ProvisionOut(
+        agent_id=agent.id,
+        token=agent.agent_token,
+        vm_name=inp.name,
+        address_name=address_name,
+        instance=instance,
+    )
+
+
+@router.get("/agent.py", response_class=PlainTextResponse)
+def get_agent_script():
+    script = f\"\"\"#!/usr/bin/env python3
+import os
+import time
+import json
+import hashlib
+import subprocess
+import requests
+
+API_BASE = os.getenv("NAVE_API_BASE", "{_API_BASE}").rstrip("/")
+TOKEN = os.getenv("NAVE_AGENT_TOKEN", "").strip()
+AGENT_ID = os.getenv("NAVE_AGENT_ID", "").strip()
+
+if not TOKEN:
+    raise SystemExit("NAVE_AGENT_TOKEN requerido")
+
+HEADERS = {"X-Agent-Token": TOKEN}
+
+def register():
+    global AGENT_ID
+    if AGENT_ID:
+        return AGENT_ID
+    payload = {
+        "vm_name": os.getenv("NAVE_VM_NAME"),
+        "public_ip": os.getenv("NAVE_PUBLIC_IP"),
+    }
+    resp = requests.post(f"{{API_BASE}}/nave/infra/agents/register", json=payload, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    AGENT_ID = str(resp.json().get("agent_id"))
+    os.environ["NAVE_AGENT_ID"] = AGENT_ID
+    return AGENT_ID
+
+def apply_wg(conf_text):
+    if not conf_text:
+        return False
+    os.makedirs("/etc/wireguard", exist_ok=True)
+    with open("/etc/wireguard/wg0.conf", "w", encoding="utf-8") as f:
+        f.write(conf_text)
+    subprocess.run(["wg-quick", "down", "wg0"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["wg-quick", "up", "wg0"], check=True)
+    return True
+
+def main():
+    last_hash = ""
+    agent_id = register()
+    while True:
+        try:
+            resp = requests.get(f"{{API_BASE}}/nave/infra/agents/{{agent_id}}/desired", headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            desired = resp.json().get("desired_json") or {{}}
+            conf = desired.get("wg_conf", "")
+            conf_hash = hashlib.sha256(conf.encode("utf-8")).hexdigest() if conf else ""
+            changed = conf_hash and conf_hash != last_hash
+            applied = False
+            if changed:
+                applied = apply_wg(conf)
+                last_hash = conf_hash if applied else last_hash
+            status = {{
+                "ts": time.time(),
+                "wg_conf_hash": last_hash,
+                "applied": applied,
+            }}
+            requests.post(
+                f"{{API_BASE}}/nave/infra/agents/{{agent_id}}/status",
+                json={{"status_json": status}},
+                headers=HEADERS,
+                timeout=10,
+            )
+        except Exception as e:
+            err = {{"ts": time.time(), "error": str(e)}}
+            try:
+                requests.post(
+                    f"{{API_BASE}}/nave/infra/agents/{{agent_id}}/status",
+                    json={{"status_json": err}},
+                    headers=HEADERS,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        time.sleep(10)
+
+if __name__ == "__main__":
+    main()
+\"\"\"
+    return script
+
+
+@router.post("/agents/bootstrap", response_model=AgentBootstrapOut)
+def create_agent_bootstrap(
+    inp: AgentBootstrapIn,
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> AgentBootstrapOut:
+    token = secrets.token_urlsafe(32)
+    agent = NaveExit(
+        profile_id=inp.profile_id,
+        vm_name=inp.name,
+        agent_token=token,
+        desired_json=None,
+        status_json=None,
+        last_seen_at=None,
+    )
+    db.add(agent)
+    db.commit()
+    db.refresh(agent)
+    return AgentBootstrapOut(agent_id=agent.id, token=token)
+
+
+@router.post("/agents/register")
+def register_agent(
+    inp: AgentRegisterIn,
+    db: Session = Depends(get_db),
+    token: str | None = Header(default=None, alias="X-Agent-Token"),
+):
+    stmt = select(NaveExit).where(NaveExit.agent_token == token)
+    agent = db.execute(stmt).scalar_one_or_none()
+    if not agent:
+        raise HTTPException(401, "Agente invalido")
+    if inp.vm_name:
+        agent.vm_name = inp.vm_name
+    if inp.public_ip:
+        agent.public_ip = inp.public_ip
+    agent.last_seen_at = now_utc()
+    db.add(agent)
+    db.commit()
+    return {"agent_id": agent.id}
+
+
+@router.get("/agents/{agent_id}/desired", response_model=AgentDesiredOut)
+def get_agent_desired(
+    agent_id: int,
+    db: Session = Depends(get_db),
+    token: str | None = Header(default=None, alias="X-Agent-Token"),
+) -> AgentDesiredOut:
+    agent = _agent_from_token(db, agent_id, token)
+    agent.last_seen_at = now_utc()
+    db.add(agent)
+    db.commit()
+    return AgentDesiredOut(agent_id=agent.id, desired_json=agent.desired_json or {})
+
+
+@router.post("/agents/{agent_id}/desired", response_model=AgentDesiredOut)
+def set_agent_desired(
+    agent_id: int,
+    inp: AgentDesiredIn,
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> AgentDesiredOut:
+    agent = db.get(NaveExit, agent_id)
+    if not agent:
+        raise HTTPException(404, "Agente no encontrado")
+    agent.desired_json = {"wg_conf": inp.wg_conf}
+    db.add(agent)
+    db.commit()
+    return AgentDesiredOut(agent_id=agent.id, desired_json=agent.desired_json)
+
+
+@router.post("/agents/{agent_id}/status", response_model=AgentStatusOut)
+def set_agent_status(
+    agent_id: int,
+    inp: AgentStatusIn,
+    db: Session = Depends(get_db),
+    token: str | None = Header(default=None, alias="X-Agent-Token"),
+) -> AgentStatusOut:
+    agent = _agent_from_token(db, agent_id, token)
+    agent.status_json = inp.status_json
+    agent.last_seen_at = now_utc()
+    db.add(agent)
+    db.commit()
+    return AgentStatusOut()

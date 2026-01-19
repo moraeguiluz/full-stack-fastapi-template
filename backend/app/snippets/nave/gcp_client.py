@@ -72,6 +72,10 @@ def _zone_url(project: str, zone: str, path: str) -> str:
     return f"https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}/{path}"
 
 
+def _global_url(project: str, path: str) -> str:
+    return f"https://compute.googleapis.com/compute/v1/projects/{project}/global/{path}"
+
+
 def wait_region_op(project: str, region: str, op_name: str, timeout_s: int = 120) -> None:
     start = time.time()
     while True:
@@ -90,6 +94,20 @@ def wait_zone_op(project: str, zone: str, op_name: str, timeout_s: int = 180) ->
     start = time.time()
     while True:
         op = _request("GET", _zone_url(project, zone, f"operations/{op_name}"))
+        if op.get("status") == "DONE":
+            err = op.get("error")
+            if err:
+                raise HTTPException(500, f"GCP operation error: {err}")
+            return
+        if time.time() - start > timeout_s:
+            raise HTTPException(504, "GCP operation timeout")
+        time.sleep(2)
+
+
+def wait_global_op(project: str, op_name: str, timeout_s: int = 120) -> None:
+    start = time.time()
+    while True:
+        op = _request("GET", _global_url(project, f"operations/{op_name}"))
         if op.get("status") == "DONE":
             err = op.get("error")
             if err:
@@ -176,6 +194,7 @@ def create_instance(
     instance: Dict[str, Any] = {
         "name": name,
         "machineType": f"zones/{zone}/machineTypes/{machine_type}",
+        "canIpForward": True,
         "networkInterfaces": [network_interface],
         "disks": [
             {
@@ -218,3 +237,34 @@ def create_instance(
     op = _request("POST", url, body=instance)
     wait_zone_op(cfg["project_id"], zone, op.get("name", ""))
     return get_instance(name, zone)
+
+
+def get_firewall(name: str) -> Dict[str, Any]:
+    cfg = defaults()
+    url = _global_url(cfg["project_id"], f"firewalls/{name}")
+    return _request("GET", url)
+
+
+def create_firewall_rule(
+    name: str,
+    network: Optional[str] = None,
+    target_tags: Optional[list[str]] = None,
+    allowed: Optional[list[Dict[str, Any]]] = None,
+    description: Optional[str] = None,
+) -> Dict[str, Any]:
+    cfg = defaults()
+    url = _global_url(cfg["project_id"], "firewalls")
+    body: Dict[str, Any] = {
+        "name": name,
+        "network": network or cfg["network"],
+        "direction": "INGRESS",
+        "priority": 1000,
+        "allowed": allowed or [{"IPProtocol": "udp", "ports": ["51820"]}],
+    }
+    if target_tags:
+        body["targetTags"] = target_tags
+    if description:
+        body["description"] = description
+    op = _request("POST", url, body=body)
+    wait_global_op(cfg["project_id"], op.get("name", ""))
+    return get_firewall(name)

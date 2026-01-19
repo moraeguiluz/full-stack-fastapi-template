@@ -1,7 +1,7 @@
 import datetime as dt
 from typing import Optional, Any
 
-from sqlalchemy import BigInteger, String, DateTime, Boolean, func
+from sqlalchemy import BigInteger, String, DateTime, Boolean, func, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,32 @@ class NaveProfile(BaseOwn):
     cookies_json: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        index=True,
+    )
+
+
+class NaveExit(BaseOwn):
+    __tablename__ = "app_nave_exit"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    profile_id: Mapped[Optional[int]] = mapped_column(BigInteger, index=True, nullable=True)
+    vm_name: Mapped[Optional[str]] = mapped_column(String(120), index=True, nullable=True)
+    public_ip: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
+
+    agent_token: Mapped[str] = mapped_column(Text, index=True)
+    desired_json: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
+    status_json: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
+
+    last_seen_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

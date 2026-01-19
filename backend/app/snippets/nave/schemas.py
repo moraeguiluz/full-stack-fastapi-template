@@ -1,7 +1,7 @@
 import datetime as dt
 from typing import Any, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ProfileListItem(BaseModel):
@@ -33,3 +33,53 @@ class CookiesOut(BaseModel):
 class NetworkOut(BaseModel):
     profile_id: int
     network_json: Any
+
+
+class AgentBootstrapIn(BaseModel):
+    profile_id: Optional[int] = None
+    name: Optional[str] = Field(default=None, max_length=120)
+
+
+class AgentBootstrapOut(BaseModel):
+    agent_id: int
+    token: str
+
+
+class AgentRegisterIn(BaseModel):
+    vm_name: Optional[str] = Field(default=None, max_length=120)
+    public_ip: Optional[str] = Field(default=None, max_length=64)
+
+
+class AgentDesiredIn(BaseModel):
+    wg_conf: str = Field(min_length=10)
+
+
+class AgentDesiredOut(BaseModel):
+    agent_id: int
+    desired_json: Any
+
+
+class AgentStatusIn(BaseModel):
+    status_json: Any
+
+
+class AgentStatusOut(BaseModel):
+    ok: bool = True
+
+
+class ProvisionIn(BaseModel):
+    name: str = Field(..., min_length=3, max_length=63)
+    profile_id: Optional[int] = None
+    address_name: Optional[str] = None
+    create_ip: bool = True
+    machine_type: Optional[str] = None
+    disk_size_gb: Optional[int] = Field(default=None, ge=10, le=200)
+    preemptible: bool = False
+
+
+class ProvisionOut(BaseModel):
+    agent_id: int
+    token: str
+    vm_name: str
+    address_name: Optional[str] = None
+    instance: Any
