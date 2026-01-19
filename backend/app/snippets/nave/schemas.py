@@ -25,6 +25,35 @@ class ProfileOut(BaseModel):
     updated_at: Optional[dt.datetime] = None
 
 
+class ProfileCreateIn(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    data_json: Optional[Any] = None
+
+
+class ProfileCreateOut(BaseModel):
+    id: int
+    name: str
+    is_active: bool = True
+    data_json: Optional[Any] = None
+    created_at: dt.datetime
+    updated_at: Optional[dt.datetime] = None
+
+
+class LoginIn(BaseModel):
+    username: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=3, max_length=128)
+
+
+class LoginOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class BootstrapOut(BaseModel):
+    ok: bool = True
+    username: str
+
+
 class CookiesOut(BaseModel):
     profile_id: int
     cookies_json: Any
@@ -65,6 +94,14 @@ class AgentStatusIn(BaseModel):
 
 class AgentStatusOut(BaseModel):
     ok: bool = True
+
+
+class AgentStatusGetOut(BaseModel):
+    agent_id: int
+    vm_name: Optional[str] = None
+    public_ip: Optional[str] = None
+    last_seen_at: Optional[dt.datetime] = None
+    status_json: Any
 
 
 class ProvisionIn(BaseModel):

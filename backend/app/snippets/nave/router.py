@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 import os
+import datetime as dt
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
+from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import get_db
 from . import infra
-from .models import NaveProfile
+from .models import NaveProfile, NaveUser
 from .schemas import (
     ProfileListOut,
     ProfileListItem,
     ProfileOut,
+    ProfileCreateIn,
+    ProfileCreateOut,
+    LoginIn,
+    LoginOut,
+    BootstrapOut,
     CookiesOut,
     NetworkOut,
 )
@@ -25,6 +32,7 @@ _SECRET = os.getenv("SECRET_KEY", "dev-change-me")
 _ALG = "HS256"
 
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/finalize")
+pwd = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # include infra endpoints under /api/v1/nave/infra
 router.include_router(infra.router)
@@ -39,6 +47,11 @@ def _decode_uid(token: str) -> int:
         return int(uid)
     except jwt.PyJWTError:
         raise HTTPException(401, "Token invalido")
+
+
+def _jwt(payload: dict, minutes: int) -> str:
+    exp = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=minutes)
+    return jwt.encode({**payload, "exp": exp}, _SECRET, algorithm=_ALG)
 
 
 def _get_profile_or_404(db: Session, profile_id: int, user_id: int) -> NaveProfile:
@@ -75,6 +88,61 @@ def list_profiles(
         for p in profiles
     ]
     return ProfileListOut(data=out)
+
+
+@router.post("/profiles", response_model=ProfileCreateOut)
+def create_profile(
+    inp: ProfileCreateIn,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2),
+) -> ProfileCreateOut:
+    user_id = _decode_uid(token)
+    profile = NaveProfile(
+        user_id=user_id,
+        name=inp.name.strip(),
+        data_json=inp.data_json or {},
+        is_active=True,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return ProfileCreateOut(
+        id=profile.id,
+        name=profile.name,
+        is_active=bool(profile.is_active),
+        data_json=profile.data_json or {},
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
+
+
+@router.post("/auth/bootstrap", response_model=BootstrapOut)
+def bootstrap_user(db: Session = Depends(get_db)) -> BootstrapOut:
+    username = "user"
+    password = "user"
+    existing = db.execute(select(NaveUser).where(NaveUser.username == username)).scalar_one_or_none()
+    if existing:
+        return BootstrapOut(ok=True, username=username)
+    user = NaveUser(
+        username=username,
+        password_hash=pwd.hash(password),
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    return BootstrapOut(ok=True, username=username)
+
+
+@router.post("/auth/login", response_model=LoginOut)
+def login(inp: LoginIn, db: Session = Depends(get_db)) -> LoginOut:
+    stmt = select(NaveUser).where(NaveUser.username == inp.username.strip())
+    user = db.execute(stmt).scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(401, "Usuario o password invalidos")
+    if not pwd.verify(inp.password, user.password_hash):
+        raise HTTPException(401, "Usuario o password invalidos")
+    token = _jwt({"sub": str(user.id)}, 60 * 24 * 7)
+    return LoginOut(access_token=token)
 
 
 @router.get("/profiles/{profile_id}", response_model=ProfileOut)

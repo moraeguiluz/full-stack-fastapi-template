@@ -21,7 +21,7 @@ from .gcp_client import (
     create_firewall_rule,
 )
 from .db import get_db, now_utc
-from .models import NaveExit
+from .models import NaveExit, NaveProfile
 from .schemas import (
     AgentBootstrapIn,
     AgentBootstrapOut,
@@ -30,6 +30,7 @@ from .schemas import (
     AgentDesiredOut,
     AgentStatusIn,
     AgentStatusOut,
+    AgentStatusGetOut,
     ProvisionIn,
     ProvisionOut,
 )
@@ -72,14 +73,20 @@ def _startup_script(api_base: str, agent_id: int, token: str, vm_name: str) -> s
     safe_name = vm_name.replace("\"", "")
     return f"""#!/usr/bin/env bash
 set -e
+export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y wireguard curl python3
+apt-get install -y wireguard curl python3 iptables iptables-persistent
 echo "net.ipv4.ip_forward=1" >/etc/sysctl.d/99-nave.conf
 sysctl -p /etc/sysctl.d/99-nave.conf
 mkdir -p /opt/nave
 curl -fsSL "{api_base}/nave/infra/agent.py" -o /opt/nave/agent.py
 chmod +x /opt/nave/agent.py
 PUBLIC_IP=$(curl -s https://ifconfig.me || true)
+WAN_IF=$(ip route | awk '/default/ {print $5; exit}')
+iptables -t nat -A POSTROUTING -o "${WAN_IF}" -j MASQUERADE
+iptables -A FORWARD -i wg0 -j ACCEPT
+iptables -A FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+netfilter-persistent save || true
 cat >/etc/systemd/system/nave-agent.service <<'SERVICE'
 [Unit]
 Description=Nave Agent
@@ -210,6 +217,37 @@ def provision_vm(
         disk_size_gb=inp.disk_size_gb,
         preemptible=inp.preemptible,
     )
+
+    public_ip = None
+    try:
+        nics = instance.get("networkInterfaces") or []
+        if nics and nics[0].get("accessConfigs"):
+            public_ip = nics[0]["accessConfigs"][0].get("natIP")
+    except Exception:
+        public_ip = None
+
+    agent.vm_name = inp.name
+    agent.address_name = address_name
+    agent.public_ip = public_ip
+    agent.instance_json = instance
+    db.add(agent)
+    db.commit()
+
+    if inp.profile_id:
+        profile = db.get(NaveProfile, inp.profile_id)
+        if profile:
+            profile.network_json = {
+                "vm_name": inp.name,
+                "address_name": address_name,
+                "public_ip": public_ip,
+                "zone": defaults().get("zone"),
+                "region": defaults().get("region"),
+                "project_id": defaults().get("project_id"),
+                "agent_id": agent.id,
+                "instance_json": instance,
+            }
+            db.add(profile)
+            db.commit()
 
     return ProvisionOut(
         agent_id=agent.id,
@@ -391,3 +429,19 @@ def set_agent_status(
     db.add(agent)
     db.commit()
     return AgentStatusOut()
+
+
+@router.get("/agents/{agent_id}/status", response_model=AgentStatusGetOut)
+def get_agent_status(
+    agent_id: int,
+    db: Session = Depends(get_db),
+    token: str | None = Header(default=None, alias="X-Agent-Token"),
+) -> AgentStatusGetOut:
+    agent = _agent_from_token(db, agent_id, token)
+    return AgentStatusGetOut(
+        agent_id=agent.id,
+        vm_name=agent.vm_name,
+        public_ip=agent.public_ip,
+        last_seen_at=agent.last_seen_at,
+        status_json=agent.status_json or {},
+    )
