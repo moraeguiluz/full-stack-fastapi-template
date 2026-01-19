@@ -50,3 +50,14 @@ class GroupCreateIn(BaseModel):
 
 class GroupMembersAddIn(BaseModel):
     member_ids: List[int] = Field(default_factory=list)
+
+
+class UserListItem(BaseModel):
+    id: int
+    nombre_completo: str = ""
+    photo_url: Optional[str] = None
+    photo_object_name: Optional[str] = None
+
+
+class UserListOut(BaseModel):
+    data: List[UserListItem]

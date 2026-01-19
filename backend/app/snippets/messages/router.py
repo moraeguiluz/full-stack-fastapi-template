@@ -19,6 +19,8 @@ from .schemas import (
     MessageCreateIn,
     GroupCreateIn,
     GroupMembersAddIn,
+    UserListOut,
+    UserListItem,
 )
 
 router = APIRouter(prefix="/messages", tags=["messages"])
@@ -62,6 +64,46 @@ def _ensure_member(thread: MessageThread, user_id: int, db: Session) -> None:
     member = db.execute(stmt).scalar_one_or_none()
     if member is None:
         raise HTTPException(404, "Thread no encontrado")
+
+
+@router.get("/users", response_model=UserListOut)
+def list_users(
+    q: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2),
+) -> UserListOut:
+    user_id = _decode_uid(token)
+    stmt = (
+        select(UserAuth, UserProfile)
+        .outerjoin(UserProfile, UserProfile.user_id == UserAuth.id)
+        .where(UserAuth.id != user_id)
+    )
+    if q and q.strip():
+        term = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                UserAuth.nombre.ilike(term),
+                UserAuth.apellido_paterno.ilike(term),
+                UserAuth.apellido_materno.ilike(term),
+                UserAuth.telefono.ilike(term),
+            )
+        )
+    stmt = stmt.limit(min(limit, 200))
+    rows = db.execute(stmt).all()
+
+    out = []
+    for user, profile in rows:
+        out.append(
+            UserListItem(
+                id=user.id,
+                nombre_completo=_full_name(user),
+                photo_url=getattr(profile, "photo_url", None),
+                photo_object_name=getattr(profile, "photo_object_name", None),
+            )
+        )
+
+    return UserListOut(data=out)
 
 
 @router.get("/threads", response_model=ThreadListOut)

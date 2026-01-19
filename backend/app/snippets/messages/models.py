@@ -22,6 +22,7 @@ class UserAuth(BaseRO):
     nombre: Mapped[Optional[str]] = mapped_column(String(120), default="")
     apellido_paterno: Mapped[Optional[str]] = mapped_column(String(120), default="")
     apellido_materno: Mapped[Optional[str]] = mapped_column(String(120), default="")
+    telefono: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
 
 class UserProfile(BaseRO):
