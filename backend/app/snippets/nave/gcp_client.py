@@ -13,7 +13,7 @@ from google.oauth2 import service_account
 
 
 _GCP_SA_B64 = os.getenv("GCP_SA_KEY_B64", "").strip()
-_GCP_PROJECT_ID = "bonube-cloud"
+_GCP_PROJECT_ID = "politicomap"
 _GCP_REGION = "northamerica-south1"
 _GCP_ZONE = "northamerica-south1-a"
 _GCP_MACHINE = "e2-small"
