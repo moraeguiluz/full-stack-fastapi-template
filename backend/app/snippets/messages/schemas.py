@@ -32,6 +32,9 @@ class MessageOut(BaseModel):
     thread_id: int
     sender_id: int
     text: str
+    delivered_at: Optional[dt.datetime] = None
+    read_at: Optional[dt.datetime] = None
+    is_deleted: bool = False
     created_at: dt.datetime
 
 

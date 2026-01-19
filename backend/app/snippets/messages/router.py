@@ -243,12 +243,24 @@ def list_messages(
     stmt = stmt.order_by(Message.id.desc()).limit(min(limit, 200))
     rows = db.execute(stmt).scalars().all()
 
+    delivered = [
+        m for m in rows if m.sender_id != user_id and m.delivered_at is None
+    ]
+    if delivered:
+        now = now_utc()
+        for m in delivered:
+            m.delivered_at = now
+        db.commit()
+
     out = [
         MessageOut(
             id=m.id,
             thread_id=m.thread_id,
             sender_id=m.sender_id,
-            text=m.text,
+            text="" if m.is_deleted else m.text,
+            delivered_at=m.delivered_at,
+            read_at=m.read_at,
+            is_deleted=m.is_deleted,
             created_at=m.created_at,
         )
         for m in rows
@@ -284,6 +296,9 @@ def send_message(
         thread_id=msg.thread_id,
         sender_id=msg.sender_id,
         text=msg.text,
+        delivered_at=msg.delivered_at,
+        read_at=msg.read_at,
+        is_deleted=msg.is_deleted,
         created_at=msg.created_at,
     )
 
@@ -327,6 +342,89 @@ def send_message_to_user(
         thread_id=msg.thread_id,
         sender_id=msg.sender_id,
         text=msg.text,
+        delivered_at=msg.delivered_at,
+        read_at=msg.read_at,
+        is_deleted=msg.is_deleted,
+        created_at=msg.created_at,
+    )
+
+
+@router.post("/threads/{thread_id}/read", response_model=MessageListOut)
+def mark_read(
+    thread_id: int,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2),
+) -> MessageListOut:
+    user_id = _decode_uid(token)
+    thread = db.get(MessageThread, thread_id)
+    if not thread:
+        raise HTTPException(404, "Thread no encontrado")
+    _ensure_member(thread, user_id, db)
+
+    stmt = select(Message).where(
+        Message.thread_id == thread_id,
+        Message.sender_id != user_id,
+        Message.read_at.is_(None),
+    )
+    rows = db.execute(stmt).scalars().all()
+    if rows:
+        now = now_utc()
+        for m in rows:
+            if m.delivered_at is None:
+                m.delivered_at = now
+            m.read_at = now
+        db.commit()
+
+    out = [
+        MessageOut(
+            id=m.id,
+            thread_id=m.thread_id,
+            sender_id=m.sender_id,
+            text="" if m.is_deleted else m.text,
+            delivered_at=m.delivered_at,
+            read_at=m.read_at,
+            is_deleted=m.is_deleted,
+            created_at=m.created_at,
+        )
+        for m in rows
+    ]
+    return MessageListOut(data=out)
+
+
+@router.patch("/messages/{message_id}/delete", response_model=MessageOut)
+def delete_message(
+    message_id: int,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2),
+) -> MessageOut:
+    user_id = _decode_uid(token)
+    msg = db.get(Message, message_id)
+    if not msg:
+        raise HTTPException(404, "Mensaje no encontrado")
+    if msg.sender_id != user_id:
+        raise HTTPException(403, "No puedes eliminar este mensaje")
+    if not msg.is_deleted:
+        msg.is_deleted = True
+        msg.deleted_at = now_utc()
+        db.add(msg)
+
+        thread = db.get(MessageThread, msg.thread_id)
+        if thread and thread.last_message_at == msg.created_at and thread.last_sender_id == user_id:
+            thread.last_message_text = "Mensaje eliminado"
+            thread.updated_at = now_utc()
+            db.add(thread)
+
+        db.commit()
+        db.refresh(msg)
+
+    return MessageOut(
+        id=msg.id,
+        thread_id=msg.thread_id,
+        sender_id=msg.sender_id,
+        text="" if msg.is_deleted else msg.text,
+        delivered_at=msg.delivered_at,
+        read_at=msg.read_at,
+        is_deleted=msg.is_deleted,
         created_at=msg.created_at,
     )
 

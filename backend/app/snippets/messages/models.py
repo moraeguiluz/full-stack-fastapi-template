@@ -60,6 +60,11 @@ class Message(BaseOwn):
     sender_id: Mapped[int] = mapped_column(BigInteger, index=True)
     text: Mapped[str] = mapped_column(Text)
 
+    delivered_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    read_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    is_deleted: Mapped[bool] = mapped_column(default=False)
+    deleted_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), default=None)
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
