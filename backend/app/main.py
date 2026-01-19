@@ -21,24 +21,32 @@ def health():
     return {"ok": True}
 
 # -------------------------------------------------------------------
-# Autoload de snippets: carga todo módulo en app/snippets/*.py que
-# exponga `router = APIRouter(...)` y lo monta bajo /api/v1
+# Autoload de snippets: carga módulos en app/snippets y subcarpetas que
+# expongan `router = APIRouter(...)` y los monta bajo /api/v1
 # -------------------------------------------------------------------
 _loaded, _failed = [], []
 
 try:
     from . import snippets as _snippets_pkg  # requiere backend/app/snippets/__init__.py
-    for m in pkgutil.iter_modules(_snippets_pkg.__path__):
-        modname = f"{_snippets_pkg.__name__}.{m.name}"
+    prefix = f"{_snippets_pkg.__name__}."
+    for m in pkgutil.walk_packages(_snippets_pkg.__path__, prefix=prefix):
+        modname = m.name
+        relname = modname[len(prefix):]
+        if "." in relname:
+            leaf = relname.split(".")[-1]
+            if leaf not in ("router", "routes"):
+                continue
+        elif m.ispkg:
+            continue
         try:
             mod = importlib.import_module(modname)
             if getattr(mod, "ENABLED", True) and hasattr(mod, "router"):
                 app.include_router(mod.router, prefix="/api/v1")
-                _loaded.append(m.name)
+                _loaded.append(relname)
             else:
-                _failed.append((m.name, "sin 'router' o deshabilitado"))
+                _failed.append((relname, "sin 'router' o deshabilitado"))
         except Exception as e:
-            _failed.append((m.name, f"import error: {e}"))
+            _failed.append((relname, f"import error: {e}"))
 except Exception as e:
     _failed.append(("__snippets__", f"package error: {e}"))
 
