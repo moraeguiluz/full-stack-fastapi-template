@@ -130,7 +130,7 @@ def _create_agent(db: Session, profile_id: Optional[int], name: Optional[str]) -
 
 
 def _agent_from_token(
-    db: Session, agent_id: int, token: str | None
+    db: Session, agent_id: int, token: Optional[str]
 ) -> NaveExit:
     if not token:
         raise HTTPException(401, "Token de agente requerido")
@@ -371,7 +371,7 @@ def create_agent_bootstrap(
 def register_agent(
     inp: AgentRegisterIn,
     db: Session = Depends(get_db),
-    token: str | None = Header(default=None, alias="X-Agent-Token"),
+    token: Optional[str] = Header(default=None, alias="X-Agent-Token"),
 ):
     stmt = select(NaveExit).where(NaveExit.agent_token == token)
     agent = db.execute(stmt).scalar_one_or_none()
@@ -391,7 +391,7 @@ def register_agent(
 def get_agent_desired(
     agent_id: int,
     db: Session = Depends(get_db),
-    token: str | None = Header(default=None, alias="X-Agent-Token"),
+    token: Optional[str] = Header(default=None, alias="X-Agent-Token"),
 ) -> AgentDesiredOut:
     agent = _agent_from_token(db, agent_id, token)
     agent.last_seen_at = now_utc()
@@ -421,7 +421,7 @@ def set_agent_status(
     agent_id: int,
     inp: AgentStatusIn,
     db: Session = Depends(get_db),
-    token: str | None = Header(default=None, alias="X-Agent-Token"),
+    token: Optional[str] = Header(default=None, alias="X-Agent-Token"),
 ) -> AgentStatusOut:
     agent = _agent_from_token(db, agent_id, token)
     agent.status_json = inp.status_json
@@ -435,7 +435,7 @@ def set_agent_status(
 def get_agent_status(
     agent_id: int,
     db: Session = Depends(get_db),
-    token: str | None = Header(default=None, alias="X-Agent-Token"),
+    token: Optional[str] = Header(default=None, alias="X-Agent-Token"),
 ) -> AgentStatusGetOut:
     agent = _agent_from_token(db, agent_id, token)
     return AgentStatusGetOut(
