@@ -260,7 +260,7 @@ def provision_vm(
 
 @router.get("/agent.py", response_class=PlainTextResponse)
 def get_agent_script():
-    script = f\"\"\"#!/usr/bin/env python3
+    script = """#!/usr/bin/env python3
 import os
 import time
 import json
@@ -268,7 +268,7 @@ import hashlib
 import subprocess
 import requests
 
-API_BASE = os.getenv("NAVE_API_BASE", "{_API_BASE}").rstrip("/")
+API_BASE = os.getenv("NAVE_API_BASE", "__API_BASE__").rstrip("/")
 TOKEN = os.getenv("NAVE_AGENT_TOKEN", "").strip()
 AGENT_ID = os.getenv("NAVE_AGENT_ID", "").strip()
 
@@ -285,7 +285,7 @@ def register():
         "vm_name": os.getenv("NAVE_VM_NAME"),
         "public_ip": os.getenv("NAVE_PUBLIC_IP"),
     }
-    resp = requests.post(f"{{API_BASE}}/nave/infra/agents/register", json=payload, headers=HEADERS, timeout=15)
+    resp = requests.post(f"{API_BASE}/nave/infra/agents/register", json=payload, headers=HEADERS, timeout=15)
     resp.raise_for_status()
     AGENT_ID = str(resp.json().get("agent_id"))
     os.environ["NAVE_AGENT_ID"] = AGENT_ID
@@ -306,9 +306,9 @@ def main():
     agent_id = register()
     while True:
         try:
-            resp = requests.get(f"{{API_BASE}}/nave/infra/agents/{{agent_id}}/desired", headers=HEADERS, timeout=15)
+            resp = requests.get(f"{API_BASE}/nave/infra/agents/{agent_id}/desired", headers=HEADERS, timeout=15)
             resp.raise_for_status()
-            desired = resp.json().get("desired_json") or {{}}
+            desired = resp.json().get("desired_json") or {}
             conf = desired.get("wg_conf", "")
             conf_hash = hashlib.sha256(conf.encode("utf-8")).hexdigest() if conf else ""
             changed = conf_hash and conf_hash != last_hash
@@ -316,23 +316,23 @@ def main():
             if changed:
                 applied = apply_wg(conf)
                 last_hash = conf_hash if applied else last_hash
-            status = {{
+            status = {
                 "ts": time.time(),
                 "wg_conf_hash": last_hash,
                 "applied": applied,
-            }}
+            }
             requests.post(
-                f"{{API_BASE}}/nave/infra/agents/{{agent_id}}/status",
-                json={{"status_json": status}},
+                f"{API_BASE}/nave/infra/agents/{agent_id}/status",
+                json={"status_json": status},
                 headers=HEADERS,
                 timeout=10,
             )
         except Exception as e:
-            err = {{"ts": time.time(), "error": str(e)}}
+            err = {"ts": time.time(), "error": str(e)}
             try:
                 requests.post(
-                    f"{{API_BASE}}/nave/infra/agents/{{agent_id}}/status",
-                    json={{"status_json": err}},
+                    f"{API_BASE}/nave/infra/agents/{agent_id}/status",
+                    json={"status_json": err},
                     headers=HEADERS,
                     timeout=10,
                 )
@@ -342,8 +342,8 @@ def main():
 
 if __name__ == "__main__":
     main()
-\"\"\"
-    return script
+"""
+    return script.replace("__API_BASE__", _API_BASE)
 
 
 @router.post("/agents/bootstrap", response_model=AgentBootstrapOut)
