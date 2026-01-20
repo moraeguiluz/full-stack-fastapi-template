@@ -154,6 +154,17 @@ def _project_has_quota(project_id: str) -> bool:
     return usage < limit
 
 
+def _retry_if_compute_disabled(project_id: str, fn):
+    try:
+        return fn()
+    except HTTPException as err:
+        detail = str(err.detail)
+        if "SERVICE_DISABLED" in detail or "accessNotConfigured" in detail or "compute.googleapis.com" in detail:
+            enable_service(project_id, "compute.googleapis.com")
+            return fn()
+        raise
+
+
 def _pick_project(db: Session) -> NaveProject:
     projects = db.execute(select(NaveProject).order_by(NaveProject.id.asc())).scalars().all()
     if not projects:
@@ -239,33 +250,49 @@ def provision_vm(
     script = _startup_script(_API_BASE, agent.id, agent.agent_token, inp.name)
 
     project = _pick_project(db)
+    try:
+        enable_service(project.project_id, "compute.googleapis.com")
+    except Exception:
+        pass
 
     tags = ["nave-wg"]
     try:
-        get_firewall("nave-wg-udp-51820", project_id=project.project_id)
+        _retry_if_compute_disabled(
+            project.project_id,
+            lambda: get_firewall("nave-wg-udp-51820", project_id=project.project_id),
+        )
     except HTTPException as err:
         if err.status_code != 404:
             raise
-        create_firewall_rule(
-            "nave-wg-udp-51820",
-            target_tags=tags,
-            allowed=[{"IPProtocol": "udp", "ports": ["51820"]}],
-            description="Nave WireGuard UDP 51820",
-            project_id=project.project_id,
+        _retry_if_compute_disabled(
+            project.project_id,
+            lambda: create_firewall_rule(
+                "nave-wg-udp-51820",
+                target_tags=tags,
+                allowed=[{"IPProtocol": "udp", "ports": ["51820"]}],
+                description="Nave WireGuard UDP 51820",
+                project_id=project.project_id,
+            ),
         )
 
     if inp.create_ip:
-        create_address(address_name, description=f"nave:{inp.name}", project_id=project.project_id)
+        _retry_if_compute_disabled(
+            project.project_id,
+            lambda: create_address(address_name, description=f"nave:{inp.name}", project_id=project.project_id),
+        )
 
-    instance = create_instance(
-        name=inp.name,
-        address_name=address_name,
-        machine_type=inp.machine_type,
-        startup_script=script,
-        tags=tags,
-        disk_size_gb=inp.disk_size_gb,
-        preemptible=inp.preemptible,
-        project_id=project.project_id,
+    instance = _retry_if_compute_disabled(
+        project.project_id,
+        lambda: create_instance(
+            name=inp.name,
+            address_name=address_name,
+            machine_type=inp.machine_type,
+            startup_script=script,
+            tags=tags,
+            disk_size_gb=inp.disk_size_gb,
+            preemptible=inp.preemptible,
+            project_id=project.project_id,
+        ),
     )
 
     public_ip = None
