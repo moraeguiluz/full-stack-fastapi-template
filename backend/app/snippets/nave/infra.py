@@ -23,6 +23,7 @@ from .gcp_client import (
     get_region_quotas,
     service_account_email,
 )
+# gcp_admin kept for future automation (org/folder scenarios)
 from .gcp_admin import (
     ensure_navigator_folder,
     create_project,
@@ -44,6 +45,9 @@ from .schemas import (
     AgentStatusGetOut,
     ProvisionIn,
     ProvisionOut,
+    ProjectRegisterIn,
+    ProjectListOut,
+    ProjectItem,
 )
 
 router = APIRouter(prefix="/infra", tags=["nave-infra"])
@@ -140,21 +144,6 @@ def _create_agent(db: Session, profile_id: Optional[int], name: Optional[str]) -
     return agent
 
 
-def _active_project(db: Session) -> Optional[NaveProject]:
-    stmt = select(NaveProject).where(NaveProject.is_active.is_(True)).order_by(NaveProject.id.desc())
-    return db.execute(stmt).scalar_one_or_none()
-
-
-def _ensure_project(db: Session) -> NaveProject:
-    project = _active_project(db)
-    if not project:
-        project = NaveProject(project_id=defaults().get("project_id"), is_active=True)
-        db.add(project)
-        db.commit()
-        db.refresh(project)
-    return project
-
-
 def _project_has_quota(project_id: str) -> bool:
     quotas = get_region_quotas(project_id=project_id)
     info = quotas.get("IN_USE_ADDRESSES")
@@ -165,32 +154,25 @@ def _project_has_quota(project_id: str) -> bool:
     return usage < limit
 
 
-def _create_new_project(db: Session, base_project_id: str) -> NaveProject:
-    enable_core_services(base_project_id)
-    folder_id = ensure_navigator_folder(base_project_id)
-    suffix = int(now_utc().timestamp())
-    project_id = f"nave-{suffix}"
-    display_name = f"Nave {suffix}"
-    create_project(project_id=project_id, display_name=display_name, parent=folder_id)
-    set_billing(project_id)
-    member = service_account_email()
-    if member:
-        sa_member = f"serviceAccount:{member}"
-        add_project_iam_member(project_id, sa_member, "roles/compute.admin")
-        add_project_iam_member(project_id, sa_member, "roles/compute.securityAdmin")
-        add_project_iam_member(project_id, sa_member, "roles/serviceusage.serviceUsageAdmin")
-    enable_service(project_id, "compute.googleapis.com")
-    project = NaveProject(
-        project_id=project_id,
-        display_name=display_name,
-        folder_id=folder_id,
-        is_active=True,
-        meta_json={"created_from": base_project_id},
-    )
-    db.add(project)
+def _pick_project(db: Session) -> NaveProject:
+    projects = db.execute(select(NaveProject).order_by(NaveProject.id.asc())).scalars().all()
+    if not projects:
+        raise HTTPException(503, "No hay proyectos registrados")
+    chosen = None
+    for proj in projects:
+        has_quota = _project_has_quota(proj.project_id)
+        if has_quota:
+            if not proj.is_active:
+                proj.is_active = True
+            if not chosen:
+                chosen = proj
+        else:
+            if proj.is_active:
+                proj.is_active = False
     db.commit()
-    db.refresh(project)
-    return project
+    if not chosen:
+        raise HTTPException(503, "No hay proyectos con cuota de IP")
+    return chosen
 
 
 def _agent_from_token(
@@ -256,12 +238,7 @@ def provision_vm(
     agent = _create_agent(db, inp.profile_id, inp.name)
     script = _startup_script(_API_BASE, agent.id, agent.agent_token, inp.name)
 
-    project = _ensure_project(db)
-    if not _project_has_quota(project.project_id):
-        project.is_active = False
-        db.add(project)
-        db.commit()
-        project = _create_new_project(db, defaults().get("project_id"))
+    project = _pick_project(db)
 
     tags = ["nave-wg"]
     try:
@@ -336,6 +313,40 @@ def get_agent_script():
     template_path = Path(__file__).with_name("agent_template.py")
     script = template_path.read_text(encoding="utf-8")
     return script.replace("__API_BASE__", _API_BASE)
+
+
+@router.post("/projects/register", response_model=ProjectListOut)
+def register_projects(
+    inp: ProjectRegisterIn,
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ProjectListOut:
+    rows = []
+    for pid in inp.projects:
+        pid = pid.strip()
+        if not pid:
+            continue
+        existing = db.execute(select(NaveProject).where(NaveProject.project_id == pid)).scalar_one_or_none()
+        if existing:
+            rows.append(existing)
+            continue
+        proj = NaveProject(project_id=pid, is_active=True)
+        db.add(proj)
+        db.commit()
+        db.refresh(proj)
+        rows.append(proj)
+    out = [ProjectItem(project_id=r.project_id, is_active=bool(r.is_active)) for r in rows]
+    return ProjectListOut(data=out)
+
+
+@router.get("/projects", response_model=ProjectListOut)
+def list_projects(
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ProjectListOut:
+    projects = db.execute(select(NaveProject).order_by(NaveProject.id.asc())).scalars().all()
+    out = [ProjectItem(project_id=p.project_id, is_active=bool(p.is_active)) for p in projects]
+    return ProjectListOut(data=out)
 
 
 @router.post("/agents/bootstrap", response_model=AgentBootstrapOut)

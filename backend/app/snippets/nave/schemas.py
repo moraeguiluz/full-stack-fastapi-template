@@ -120,3 +120,16 @@ class ProvisionOut(BaseModel):
     vm_name: str
     address_name: Optional[str] = None
     instance: Any
+
+
+class ProjectRegisterIn(BaseModel):
+    projects: List[str] = Field(default_factory=list)
+
+
+class ProjectItem(BaseModel):
+    project_id: str
+    is_active: bool = True
+
+
+class ProjectListOut(BaseModel):
+    data: List[ProjectItem]
