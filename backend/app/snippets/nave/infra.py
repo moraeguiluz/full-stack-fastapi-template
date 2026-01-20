@@ -287,7 +287,7 @@ def provision_vm(
     script = _startup_script(_API_BASE, agent.id, agent.agent_token, inp.name)
 
     try:
-        project = _pick_project(db, timeline)
+    project = _pick_project(db, timeline)
     except HTTPException as err:
         detail = err.detail if isinstance(err.detail, dict) else {"message": err.detail}
         detail["timeline"] = detail.get("timeline") or timeline
@@ -357,6 +357,18 @@ def provision_vm(
     except Exception:
         public_ip = None
 
+    network_json = {
+        "vm_name": inp.name,
+        "address_name": address_name,
+        "public_ip": public_ip,
+        "zone": defaults().get("zone"),
+        "region": defaults().get("region"),
+        "project_id": project.project_id,
+        "agent_id": agent.id,
+        "instance_json": instance,
+        "timeline": timeline,
+    }
+
     agent.vm_name = inp.name
     agent.address_name = address_name
     agent.public_ip = public_ip
@@ -367,17 +379,7 @@ def provision_vm(
     if inp.profile_id:
         profile = db.get(NaveProfile, inp.profile_id)
         if profile:
-            profile.network_json = {
-                "vm_name": inp.name,
-                "address_name": address_name,
-                "public_ip": public_ip,
-                "zone": defaults().get("zone"),
-                "region": defaults().get("region"),
-                "project_id": project.project_id,
-                "agent_id": agent.id,
-                "instance_json": instance,
-                "timeline": timeline,
-            }
+            profile.network_json = network_json
             db.add(profile)
             db.commit()
 
@@ -388,6 +390,7 @@ def provision_vm(
         address_name=address_name,
         instance=instance,
         timeline=timeline,
+        network_json=network_json,
     )
 
 

@@ -114,6 +114,7 @@ def create_profile(
         user_id=user_id,
         name=inp.name.strip(),
         data_json=inp.data_json or {},
+        network_json=inp.network_json or {},
         is_active=True,
     )
     db.add(profile)
@@ -124,6 +125,7 @@ def create_profile(
         name=profile.name,
         is_active=bool(profile.is_active),
         data_json=profile.data_json or {},
+        network_json=profile.network_json or {},
         created_at=profile.created_at,
         updated_at=profile.updated_at,
     )

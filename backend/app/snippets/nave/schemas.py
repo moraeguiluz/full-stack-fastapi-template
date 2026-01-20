@@ -28,6 +28,7 @@ class ProfileOut(BaseModel):
 class ProfileCreateIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     data_json: Optional[Any] = None
+    network_json: Optional[Any] = None
 
 
 class ProfileCreateOut(BaseModel):
@@ -35,6 +36,7 @@ class ProfileCreateOut(BaseModel):
     name: str
     is_active: bool = True
     data_json: Optional[Any] = None
+    network_json: Optional[Any] = None
     created_at: dt.datetime
     updated_at: Optional[dt.datetime] = None
 
@@ -121,6 +123,7 @@ class ProvisionOut(BaseModel):
     address_name: Optional[str] = None
     instance: Any
     timeline: Optional[List[Any]] = None
+    network_json: Optional[Any] = None
 
 
 class ProjectRegisterIn(BaseModel):
