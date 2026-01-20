@@ -107,19 +107,34 @@ def add_project_iam_member(project_id: str, member: str, role: str) -> None:
     set_iam_policy(project_id, policy)
 
 
-def enable_service(project_id: str, service: str) -> None:
-    op = _request("POST", _serviceusage_url(f"projects/{project_id}/services/{service}:enable"))
-    name = op.get("name")
-    if not name:
-        return
+def enable_service(project_id: str, service: str, timeout_s: int = 300) -> None:
     start = time.time()
+    backoff = 2
     while True:
-        status = _request("GET", _serviceusage_url(name))
-        if status.get("done"):
-            return
-        if time.time() - start > 180:
-            raise HTTPException(504, "Service enable timeout")
-        time.sleep(2)
+        try:
+            op = _request(
+                "POST",
+                _serviceusage_url(f"projects/{project_id}/services/{service}:enable"),
+            )
+            name = op.get("name")
+            if not name:
+                return
+            while True:
+                status = _request("GET", _serviceusage_url(name))
+                if status.get("done"):
+                    return
+                if time.time() - start > timeout_s:
+                    raise HTTPException(504, "Service enable timeout")
+                time.sleep(2)
+        except HTTPException as exc:
+            msg = str(exc.detail) if hasattr(exc, "detail") else str(exc)
+            if "SERVICE_DISABLED" in msg or "has not been used" in msg or "PERMISSION_DENIED" in msg:
+                if time.time() - start > timeout_s:
+                    raise
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 20)
+                continue
+            raise
 
 
 def enable_core_services(project_id: str) -> None:
