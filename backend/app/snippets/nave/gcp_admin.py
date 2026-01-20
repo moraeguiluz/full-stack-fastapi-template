@@ -27,12 +27,9 @@ def get_project(project_id: str) -> Dict[str, Any]:
     return _request("GET", _crm_url(f"projects/{project_id}"))
 
 
-def get_project_parent(project_id: str) -> str:
+def get_project_parent(project_id: str) -> Optional[str]:
     proj = get_project(project_id)
-    parent = proj.get("parent")
-    if not parent:
-        raise HTTPException(500, "Proyecto sin parent")
-    return parent
+    return proj.get("parent")
 
 
 def list_folders(parent: str) -> Dict[str, Any]:
@@ -61,8 +58,10 @@ def _wait_folder_op(op_name: str, timeout_s: int = 120) -> str:
         time.sleep(2)
 
 
-def create_project(project_id: str, display_name: str, parent: str) -> Dict[str, Any]:
-    body = {"projectId": project_id, "displayName": display_name, "parent": parent}
+def create_project(project_id: str, display_name: str, parent: Optional[str] = None) -> Dict[str, Any]:
+    body = {"projectId": project_id, "displayName": display_name}
+    if parent:
+        body["parent"] = parent
     op = _request("POST", _crm_url("projects"), body=body)
     return _wait_project_op(op.get("name"))
 
@@ -146,6 +145,8 @@ def enable_core_services(project_id: str) -> None:
     enable_service(project_id, "serviceusage.googleapis.com")
 
 
-def ensure_navigator_folder(project_id: str) -> str:
+def ensure_navigator_folder(project_id: str) -> Optional[str]:
     parent = get_project_parent(project_id)
+    if not parent:
+        return None
     return find_or_create_folder(parent, _FOLDER_NAME)
