@@ -154,18 +154,26 @@ def _project_has_quota(project_id: str) -> bool:
     return usage < limit
 
 
-def _retry_if_compute_disabled(project_id: str, fn):
+def _retry_if_compute_disabled(project_id: str, fn, timeline: Optional[list[dict[str, Any]]] = None):
     try:
         return fn()
     except HTTPException as err:
         detail = str(err.detail)
         if "SERVICE_DISABLED" in detail or "accessNotConfigured" in detail or "compute.googleapis.com" in detail:
+            if timeline is not None:
+                _log_step(timeline, "enable_compute_api", {"project_id": project_id})
             enable_service(project_id, "compute.googleapis.com")
+            if timeline is not None:
+                _log_step(timeline, "compute_api_enabled", {"project_id": project_id})
             return fn()
         raise
 
 
-def _pick_project(db: Session) -> NaveProject:
+def _log_step(timeline: list[dict[str, Any]], action: str, info: Optional[Any] = None) -> None:
+    timeline.append({"ts": now_utc().isoformat(), "action": action, "info": info})
+
+
+def _pick_project(db: Session, timeline: list[dict[str, Any]]) -> NaveProject:
     projects = db.execute(select(NaveProject).order_by(NaveProject.id.asc())).scalars().all()
     if not projects:
         defaults_list = [
@@ -183,26 +191,31 @@ def _pick_project(db: Session) -> NaveProject:
     if not projects:
         raise HTTPException(503, "No hay proyectos registrados")
     chosen = None
-    last_error = None
     for proj in projects:
+        _log_step(timeline, "check_project", {"project_id": proj.project_id})
+        try:
+            _log_step(timeline, "enable_compute_api", {"project_id": proj.project_id})
+            enable_service(proj.project_id, "compute.googleapis.com")
+            _log_step(timeline, "compute_api_enabled", {"project_id": proj.project_id})
+        except Exception as err:
+            _log_step(timeline, "compute_enable_error", {"project_id": proj.project_id, "error": str(err)})
         try:
             has_quota = _project_has_quota(proj.project_id)
         except HTTPException as err:
-            last_error = err.detail
+            _log_step(timeline, "quota_error", {"project_id": proj.project_id, "error": err.detail})
             has_quota = False
         if has_quota:
             if not proj.is_active:
                 proj.is_active = True
             if not chosen:
                 chosen = proj
+                _log_step(timeline, "project_selected", {"project_id": proj.project_id})
         else:
             if proj.is_active:
                 proj.is_active = False
     db.commit()
     if not chosen:
-        if last_error:
-            raise HTTPException(503, f"No hay proyectos con cuota de IP: {last_error}")
-        raise HTTPException(503, "No hay proyectos con cuota de IP")
+        raise HTTPException(503, {"message": "No hay proyectos con cuota de IP", "timeline": timeline})
     return chosen
 
 
@@ -266,23 +279,30 @@ def provision_vm(
     address_name = inp.address_name or f"{inp.name}-ip"
     _ensure_name(address_name)
 
+    timeline: list[dict[str, Any]] = []
+    _log_step(timeline, "start_provision", {"vm_name": inp.name, "profile_id": inp.profile_id})
+
     agent = _create_agent(db, inp.profile_id, inp.name)
+    _log_step(timeline, "agent_created", {"agent_id": agent.id})
     script = _startup_script(_API_BASE, agent.id, agent.agent_token, inp.name)
 
-    project = _pick_project(db)
     try:
-        enable_service(project.project_id, "compute.googleapis.com")
-    except Exception:
-        pass
+        project = _pick_project(db, timeline)
+    except HTTPException as err:
+        detail = err.detail if isinstance(err.detail, dict) else {"message": err.detail}
+        detail["timeline"] = detail.get("timeline") or timeline
+        raise HTTPException(err.status_code, detail)
 
     tags = ["nave-wg"]
     try:
         _retry_if_compute_disabled(
             project.project_id,
             lambda: get_firewall("nave-wg-udp-51820", project_id=project.project_id),
+            timeline=timeline,
         )
     except HTTPException as err:
         if err.status_code != 404:
+            _log_step(timeline, "firewall_error", {"project_id": project.project_id, "error": err.detail})
             raise
         _retry_if_compute_disabled(
             project.project_id,
@@ -293,27 +313,41 @@ def provision_vm(
                 description="Nave WireGuard UDP 51820",
                 project_id=project.project_id,
             ),
+            timeline=timeline,
         )
+    _log_step(timeline, "firewall_ready", {"project_id": project.project_id})
 
     if inp.create_ip:
-        _retry_if_compute_disabled(
-            project.project_id,
-            lambda: create_address(address_name, description=f"nave:{inp.name}", project_id=project.project_id),
-        )
+        try:
+            _retry_if_compute_disabled(
+                project.project_id,
+                lambda: create_address(address_name, description=f"nave:{inp.name}", project_id=project.project_id),
+                timeline=timeline,
+            )
+            _log_step(timeline, "address_created", {"address_name": address_name})
+        except HTTPException as err:
+            _log_step(timeline, "address_error", {"error": err.detail})
+            raise
 
-    instance = _retry_if_compute_disabled(
-        project.project_id,
-        lambda: create_instance(
-            name=inp.name,
-            address_name=address_name,
-            machine_type=inp.machine_type,
-            startup_script=script,
-            tags=tags,
-            disk_size_gb=inp.disk_size_gb,
-            preemptible=inp.preemptible,
-            project_id=project.project_id,
-        ),
-    )
+    try:
+        instance = _retry_if_compute_disabled(
+            project.project_id,
+            lambda: create_instance(
+                name=inp.name,
+                address_name=address_name,
+                machine_type=inp.machine_type,
+                startup_script=script,
+                tags=tags,
+                disk_size_gb=inp.disk_size_gb,
+                preemptible=inp.preemptible,
+                project_id=project.project_id,
+            ),
+            timeline=timeline,
+        )
+        _log_step(timeline, "instance_created", {"project_id": project.project_id})
+    except HTTPException as err:
+        _log_step(timeline, "instance_error", {"project_id": project.project_id, "error": err.detail})
+        raise
 
     public_ip = None
     try:
@@ -342,6 +376,7 @@ def provision_vm(
                 "project_id": project.project_id,
                 "agent_id": agent.id,
                 "instance_json": instance,
+                "timeline": timeline,
             }
             db.add(profile)
             db.commit()
@@ -352,6 +387,7 @@ def provision_vm(
         vm_name=inp.name,
         address_name=address_name,
         instance=instance,
+        timeline=timeline,
     )
 
 

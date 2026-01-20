@@ -120,6 +120,7 @@ class ProvisionOut(BaseModel):
     vm_name: str
     address_name: Optional[str] = None
     instance: Any
+    timeline: Optional[List[Any]] = None
 
 
 class ProjectRegisterIn(BaseModel):
