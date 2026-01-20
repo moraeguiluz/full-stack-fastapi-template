@@ -138,6 +138,10 @@ def enable_service(project_id: str, service: str, timeout_s: int = 300) -> None:
             raise
 
 
+def get_service_status(project_id: str, service: str) -> Dict[str, Any]:
+    return _request("GET", _serviceusage_url(f"projects/{project_id}/services/{service}"))
+
+
 def enable_core_services(project_id: str) -> None:
     # Required for folders/projects/billing flows
     enable_service(project_id, "cloudresourcemanager.googleapis.com")

@@ -70,6 +70,29 @@ class NaveProject(BaseOwn):
     )
 
 
+class NaveProvision(BaseOwn):
+    __tablename__ = "app_nave_provision"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    profile_id: Mapped[Optional[int]] = mapped_column(BigInteger, index=True, nullable=True)
+    vm_name: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="starting")
+    timeline_json: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
+    result_json: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
+    error_json: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        index=True,
+    )
+
+
 class NaveExit(BaseOwn):
     __tablename__ = "app_nave_exit"
 

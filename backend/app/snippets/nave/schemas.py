@@ -126,6 +126,18 @@ class ProvisionOut(BaseModel):
     network_json: Optional[Any] = None
 
 
+class ProvisionStartOut(BaseModel):
+    provision_id: int
+
+
+class ProvisionStatusOut(BaseModel):
+    provision_id: int
+    status: str
+    timeline: Optional[Any] = None
+    result_json: Optional[Any] = None
+    error_json: Optional[Any] = None
+
+
 class ProjectRegisterIn(BaseModel):
     projects: List[str] = Field(default_factory=list)
 
@@ -137,3 +149,39 @@ class ProjectItem(BaseModel):
 
 class ProjectListOut(BaseModel):
     data: List[ProjectItem]
+
+
+class OpsCreateIpIn(BaseModel):
+    project_id: str
+    name: str
+    description: Optional[str] = None
+
+
+class OpsCreateVmIn(BaseModel):
+    project_id: str
+    name: str
+    address_name: Optional[str] = None
+    machine_type: Optional[str] = None
+    startup_script: Optional[str] = None
+    disk_size_gb: Optional[int] = Field(default=None, ge=10, le=200)
+
+
+class OpsStartupScriptOut(BaseModel):
+    startup_script: str
+
+
+class OpsSetStartupIn(BaseModel):
+    project_id: str
+    instance_name: str
+    startup_script: str
+
+
+class OpsProjectStatusItem(BaseModel):
+    project_id: str
+    compute_enabled: Optional[bool] = None
+    quota_in_use: Optional[float] = None
+    quota_limit: Optional[float] = None
+
+
+class OpsProjectStatusOut(BaseModel):
+    data: List[OpsProjectStatusItem]

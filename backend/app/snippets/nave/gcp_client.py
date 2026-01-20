@@ -246,6 +246,24 @@ def create_instance(
     return get_instance(name, zone, project_id=cfg["project_id"])
 
 
+def set_startup_script(
+    project_id: str,
+    zone: str,
+    instance_name: str,
+    startup_script: str,
+) -> Dict[str, Any]:
+    inst = get_instance(instance_name, zone, project_id=project_id)
+    metadata = inst.get("metadata") or {}
+    items = metadata.get("items") or []
+    items = [i for i in items if i.get("key") != "startup-script"]
+    items.append({"key": "startup-script", "value": startup_script})
+    body = {"fingerprint": metadata.get("fingerprint"), "items": items}
+    url = _zone_url(project_id, zone, f"instances/{instance_name}/setMetadata")
+    op = _request("POST", url, body=body)
+    wait_zone_op(project_id, zone, op.get("name", ""))
+    return get_instance(instance_name, zone, project_id=project_id)
+
+
 def get_firewall(name: str, project_id: Optional[str] = None) -> Dict[str, Any]:
     cfg = defaults(project_id)
     url = _global_url(cfg["project_id"], f"firewalls/{name}")

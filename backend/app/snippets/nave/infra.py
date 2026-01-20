@@ -5,7 +5,7 @@ import secrets
 from typing import Optional, Any
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -22,6 +22,7 @@ from .gcp_client import (
     create_firewall_rule,
     get_region_quotas,
     service_account_email,
+    set_startup_script,
 )
 # gcp_admin kept for future automation (org/folder scenarios)
 from .gcp_admin import (
@@ -31,9 +32,10 @@ from .gcp_admin import (
     enable_service,
     add_project_iam_member,
     enable_core_services,
+    get_service_status,
 )
-from .db import get_db, now_utc
-from .models import NaveExit, NaveProfile, NaveProject
+from .db import get_db, now_utc, new_session
+from .models import NaveExit, NaveProfile, NaveProject, NaveProvision
 from .schemas import (
     AgentBootstrapIn,
     AgentBootstrapOut,
@@ -45,9 +47,17 @@ from .schemas import (
     AgentStatusGetOut,
     ProvisionIn,
     ProvisionOut,
+    ProvisionStartOut,
+    ProvisionStatusOut,
     ProjectRegisterIn,
     ProjectListOut,
     ProjectItem,
+    OpsCreateIpIn,
+    OpsCreateVmIn,
+    OpsStartupScriptOut,
+    OpsSetStartupIn,
+    OpsProjectStatusItem,
+    OpsProjectStatusOut,
 )
 
 router = APIRouter(prefix="/infra", tags=["nave-infra"])
@@ -144,6 +154,39 @@ def _create_agent(db: Session, profile_id: Optional[int], name: Optional[str]) -
     return agent
 
 
+def _create_provision(db: Session, vm_name: str, profile_id: Optional[int]) -> NaveProvision:
+    prov = NaveProvision(
+        vm_name=vm_name,
+        profile_id=profile_id,
+        status="starting",
+        timeline_json=[],
+    )
+    db.add(prov)
+    db.commit()
+    db.refresh(prov)
+    return prov
+
+
+def _update_provision(
+    db: Session,
+    prov: NaveProvision,
+    status: Optional[str] = None,
+    timeline: Optional[list[dict[str, Any]]] = None,
+    result: Optional[Any] = None,
+    error: Optional[Any] = None,
+) -> None:
+    if status:
+        prov.status = status
+    if timeline is not None:
+        prov.timeline_json = timeline
+    if result is not None:
+        prov.result_json = result
+    if error is not None:
+        prov.error_json = error
+    db.add(prov)
+    db.commit()
+
+
 def _project_has_quota(project_id: str) -> bool:
     quotas = get_region_quotas(project_id=project_id)
     info = quotas.get("IN_USE_ADDRESSES")
@@ -154,26 +197,45 @@ def _project_has_quota(project_id: str) -> bool:
     return usage < limit
 
 
-def _retry_if_compute_disabled(project_id: str, fn, timeline: Optional[list[dict[str, Any]]] = None):
+def _retry_if_compute_disabled(
+    project_id: str,
+    fn,
+    timeline: Optional[list[dict[str, Any]]] = None,
+    db: Optional[Session] = None,
+    provision: Optional[NaveProvision] = None,
+):
     try:
         return fn()
     except HTTPException as err:
         detail = str(err.detail)
         if "SERVICE_DISABLED" in detail or "accessNotConfigured" in detail or "compute.googleapis.com" in detail:
             if timeline is not None:
-                _log_step(timeline, "enable_compute_api", {"project_id": project_id})
+                _log_step(timeline, "enable_compute_api", {"project_id": project_id}, db=db, provision=provision)
             enable_service(project_id, "compute.googleapis.com")
             if timeline is not None:
-                _log_step(timeline, "compute_api_enabled", {"project_id": project_id})
+                _log_step(timeline, "compute_api_enabled", {"project_id": project_id}, db=db, provision=provision)
             return fn()
         raise
 
 
-def _log_step(timeline: list[dict[str, Any]], action: str, info: Optional[Any] = None) -> None:
+def _log_step(
+    timeline: list[dict[str, Any]],
+    action: str,
+    info: Optional[Any] = None,
+    db: Optional[Session] = None,
+    provision: Optional[NaveProvision] = None,
+    status: Optional[str] = None,
+) -> None:
     timeline.append({"ts": now_utc().isoformat(), "action": action, "info": info})
+    if db and provision:
+        _update_provision(db, provision, status=status, timeline=timeline)
 
 
-def _pick_project(db: Session, timeline: list[dict[str, Any]]) -> NaveProject:
+def _pick_project(
+    db: Session,
+    timeline: list[dict[str, Any]],
+    provision: Optional[NaveProvision],
+) -> NaveProject:
     projects = db.execute(select(NaveProject).order_by(NaveProject.id.asc())).scalars().all()
     if not projects:
         defaults_list = [
@@ -192,24 +254,42 @@ def _pick_project(db: Session, timeline: list[dict[str, Any]]) -> NaveProject:
         raise HTTPException(503, "No hay proyectos registrados")
     chosen = None
     for proj in projects:
-        _log_step(timeline, "check_project", {"project_id": proj.project_id})
+        _log_step(timeline, "check_project", {"project_id": proj.project_id}, db=db, provision=provision)
         try:
-            _log_step(timeline, "enable_compute_api", {"project_id": proj.project_id})
+            _log_step(timeline, "enable_compute_api", {"project_id": proj.project_id}, db=db, provision=provision)
             enable_service(proj.project_id, "compute.googleapis.com")
-            _log_step(timeline, "compute_api_enabled", {"project_id": proj.project_id})
+            _log_step(timeline, "compute_api_enabled", {"project_id": proj.project_id}, db=db, provision=provision)
         except Exception as err:
-            _log_step(timeline, "compute_enable_error", {"project_id": proj.project_id, "error": str(err)})
+            _log_step(
+                timeline,
+                "compute_enable_error",
+                {"project_id": proj.project_id, "error": str(err)},
+                db=db,
+                provision=provision,
+            )
         try:
             has_quota = _project_has_quota(proj.project_id)
         except HTTPException as err:
-            _log_step(timeline, "quota_error", {"project_id": proj.project_id, "error": err.detail})
+            _log_step(
+                timeline,
+                "quota_error",
+                {"project_id": proj.project_id, "error": err.detail},
+                db=db,
+                provision=provision,
+            )
             has_quota = False
         if has_quota:
             if not proj.is_active:
                 proj.is_active = True
             if not chosen:
                 chosen = proj
-                _log_step(timeline, "project_selected", {"project_id": proj.project_id})
+                _log_step(
+                    timeline,
+                    "project_selected",
+                    {"project_id": proj.project_id},
+                    db=db,
+                    provision=provision,
+                )
         else:
             if proj.is_active:
                 proj.is_active = False
@@ -217,6 +297,209 @@ def _pick_project(db: Session, timeline: list[dict[str, Any]]) -> NaveProject:
     if not chosen:
         raise HTTPException(503, {"message": "No hay proyectos con cuota de IP", "timeline": timeline})
     return chosen
+
+
+def _run_provision(
+    db: Session,
+    inp: ProvisionIn,
+    provision: NaveProvision,
+    timeline: list[dict[str, Any]],
+    address_name: str,
+) -> ProvisionOut:
+    agent = _create_agent(db, inp.profile_id, inp.name)
+    _log_step(timeline, "agent_created", {"agent_id": agent.id}, db=db, provision=provision)
+    script = _startup_script(_API_BASE, agent.id, agent.agent_token, inp.name)
+
+    try:
+        project = _pick_project(db, timeline, provision)
+    except HTTPException as err:
+        detail = err.detail if isinstance(err.detail, dict) else {"message": err.detail}
+        detail["timeline"] = detail.get("timeline") or timeline
+        _update_provision(db, provision, status="error", timeline=timeline, error=detail)
+        raise HTTPException(err.status_code, detail)
+
+    tags = ["nave-wg"]
+    try:
+        _retry_if_compute_disabled(
+            project.project_id,
+            lambda: get_firewall("nave-wg-udp-51820", project_id=project.project_id),
+            timeline=timeline,
+            db=db,
+            provision=provision,
+        )
+    except HTTPException as err:
+        if err.status_code != 404:
+            _log_step(timeline, "firewall_error", {"project_id": project.project_id, "error": err.detail}, db=db, provision=provision)
+            _update_provision(db, provision, status="error", timeline=timeline, error=err.detail)
+            raise
+        _retry_if_compute_disabled(
+            project.project_id,
+            lambda: create_firewall_rule(
+                "nave-wg-udp-51820",
+                target_tags=tags,
+                allowed=[{"IPProtocol": "udp", "ports": ["51820"]}],
+                description="Nave WireGuard UDP 51820",
+                project_id=project.project_id,
+            ),
+            timeline=timeline,
+            db=db,
+            provision=provision,
+        )
+    _log_step(timeline, "firewall_ready", {"project_id": project.project_id}, db=db, provision=provision)
+
+    if inp.create_ip:
+        try:
+            _retry_if_compute_disabled(
+                project.project_id,
+                lambda: create_address(address_name, description=f"nave:{inp.name}", project_id=project.project_id),
+                timeline=timeline,
+                db=db,
+                provision=provision,
+            )
+            _log_step(timeline, "address_created", {"address_name": address_name}, db=db, provision=provision)
+        except HTTPException as err:
+            _log_step(timeline, "address_error", {"error": err.detail}, db=db, provision=provision)
+            _update_provision(db, provision, status="error", timeline=timeline, error=err.detail)
+            raise
+
+    try:
+        instance = _retry_if_compute_disabled(
+            project.project_id,
+            lambda: create_instance(
+                name=inp.name,
+                address_name=address_name,
+                machine_type=inp.machine_type,
+                startup_script=script,
+                tags=tags,
+                disk_size_gb=inp.disk_size_gb,
+                preemptible=inp.preemptible,
+                project_id=project.project_id,
+            ),
+            timeline=timeline,
+            db=db,
+            provision=provision,
+        )
+        _log_step(timeline, "instance_created", {"project_id": project.project_id}, db=db, provision=provision)
+    except HTTPException as err:
+        _log_step(
+            timeline,
+            "instance_error",
+            {"project_id": project.project_id, "error": err.detail},
+            db=db,
+            provision=provision,
+        )
+        _update_provision(db, provision, status="error", timeline=timeline, error=err.detail)
+        raise
+
+    public_ip = None
+    try:
+        nics = instance.get("networkInterfaces") or []
+        if nics and nics[0].get("accessConfigs"):
+            public_ip = nics[0]["accessConfigs"][0].get("natIP")
+    except Exception:
+        public_ip = None
+
+    network_json = {
+        "vm_name": inp.name,
+        "address_name": address_name,
+        "public_ip": public_ip,
+        "zone": defaults().get("zone"),
+        "region": defaults().get("region"),
+        "project_id": project.project_id,
+        "agent_id": agent.id,
+        "agent_token": agent.agent_token,
+        "instance_json": instance,
+        "timeline": timeline,
+    }
+
+    agent.vm_name = inp.name
+    agent.address_name = address_name
+    agent.public_ip = public_ip
+    agent.instance_json = instance
+    db.add(agent)
+    db.commit()
+
+    _update_provision(db, provision, status="done", timeline=timeline, result=network_json)
+
+    if inp.profile_id:
+        profile = db.get(NaveProfile, inp.profile_id)
+        if profile:
+            profile.network_json = network_json
+            db.add(profile)
+            db.commit()
+
+    return ProvisionOut(
+        agent_id=agent.id,
+        token=agent.agent_token,
+        vm_name=inp.name,
+        address_name=address_name,
+        instance=instance,
+        timeline=timeline,
+        network_json=network_json,
+    )
+
+@router.post("/provision/start", response_model=ProvisionStartOut)
+def provision_start(
+    inp: ProvisionIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ProvisionStartOut:
+    _ensure_name(inp.name)
+    address_name = inp.address_name or f"{inp.name}-ip"
+    _ensure_name(address_name)
+    timeline: list[dict[str, Any]] = []
+    provision = _create_provision(db, inp.name, inp.profile_id)
+    _log_step(
+        timeline,
+        "start_provision",
+        {"vm_name": inp.name, "profile_id": inp.profile_id},
+        db=db,
+        provision=provision,
+        status="running",
+    )
+    background_tasks.add_task(_provision_background, provision.id, inp, address_name)
+    return ProvisionStartOut(provision_id=provision.id)
+
+
+@router.get("/provision/{provision_id}", response_model=ProvisionStatusOut)
+def provision_status(
+    provision_id: int,
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ProvisionStatusOut:
+    prov = db.get(NaveProvision, provision_id)
+    if not prov:
+        raise HTTPException(404, "Provision no encontrado")
+    return ProvisionStatusOut(
+        provision_id=prov.id,
+        status=prov.status,
+        timeline=prov.timeline_json or [],
+        result_json=prov.result_json,
+        error_json=prov.error_json,
+    )
+
+
+
+def _provision_background(provision_id: int, inp: ProvisionIn, address_name: str) -> None:
+    db = new_session()
+    try:
+        prov = db.get(NaveProvision, provision_id)
+        if not prov:
+            return
+        timeline = list(prov.timeline_json or [])
+        _run_provision(db, inp, prov, timeline, address_name)
+    except HTTPException as err:
+        prov = db.get(NaveProvision, provision_id)
+        if prov:
+            _update_provision(db, prov, status="error", error=err.detail)
+    except Exception as exc:
+        prov = db.get(NaveProvision, provision_id)
+        if prov:
+            _update_provision(db, prov, status="error", error=str(exc))
+    finally:
+        db.close()
+
 
 
 def _agent_from_token(
@@ -280,118 +563,16 @@ def provision_vm(
     _ensure_name(address_name)
 
     timeline: list[dict[str, Any]] = []
-    _log_step(timeline, "start_provision", {"vm_name": inp.name, "profile_id": inp.profile_id})
-
-    agent = _create_agent(db, inp.profile_id, inp.name)
-    _log_step(timeline, "agent_created", {"agent_id": agent.id})
-    script = _startup_script(_API_BASE, agent.id, agent.agent_token, inp.name)
-
-    try:
-        project = _pick_project(db, timeline)
-    except HTTPException as err:
-        detail = err.detail if isinstance(err.detail, dict) else {"message": err.detail}
-        detail["timeline"] = detail.get("timeline") or timeline
-        raise HTTPException(err.status_code, detail)
-
-    tags = ["nave-wg"]
-    try:
-        _retry_if_compute_disabled(
-            project.project_id,
-            lambda: get_firewall("nave-wg-udp-51820", project_id=project.project_id),
-            timeline=timeline,
-        )
-    except HTTPException as err:
-        if err.status_code != 404:
-            _log_step(timeline, "firewall_error", {"project_id": project.project_id, "error": err.detail})
-            raise
-        _retry_if_compute_disabled(
-            project.project_id,
-            lambda: create_firewall_rule(
-                "nave-wg-udp-51820",
-                target_tags=tags,
-                allowed=[{"IPProtocol": "udp", "ports": ["51820"]}],
-                description="Nave WireGuard UDP 51820",
-                project_id=project.project_id,
-            ),
-            timeline=timeline,
-        )
-    _log_step(timeline, "firewall_ready", {"project_id": project.project_id})
-
-    if inp.create_ip:
-        try:
-            _retry_if_compute_disabled(
-                project.project_id,
-                lambda: create_address(address_name, description=f"nave:{inp.name}", project_id=project.project_id),
-                timeline=timeline,
-            )
-            _log_step(timeline, "address_created", {"address_name": address_name})
-        except HTTPException as err:
-            _log_step(timeline, "address_error", {"error": err.detail})
-            raise
-
-    try:
-        instance = _retry_if_compute_disabled(
-            project.project_id,
-            lambda: create_instance(
-                name=inp.name,
-                address_name=address_name,
-                machine_type=inp.machine_type,
-                startup_script=script,
-                tags=tags,
-                disk_size_gb=inp.disk_size_gb,
-                preemptible=inp.preemptible,
-                project_id=project.project_id,
-            ),
-            timeline=timeline,
-        )
-        _log_step(timeline, "instance_created", {"project_id": project.project_id})
-    except HTTPException as err:
-        _log_step(timeline, "instance_error", {"project_id": project.project_id, "error": err.detail})
-        raise
-
-    public_ip = None
-    try:
-        nics = instance.get("networkInterfaces") or []
-        if nics and nics[0].get("accessConfigs"):
-            public_ip = nics[0]["accessConfigs"][0].get("natIP")
-    except Exception:
-        public_ip = None
-
-    network_json = {
-        "vm_name": inp.name,
-        "address_name": address_name,
-        "public_ip": public_ip,
-        "zone": defaults().get("zone"),
-        "region": defaults().get("region"),
-        "project_id": project.project_id,
-        "agent_id": agent.id,
-        "instance_json": instance,
-        "timeline": timeline,
-    }
-
-    agent.vm_name = inp.name
-    agent.address_name = address_name
-    agent.public_ip = public_ip
-    agent.instance_json = instance
-    db.add(agent)
-    db.commit()
-
-    if inp.profile_id:
-        profile = db.get(NaveProfile, inp.profile_id)
-        if profile:
-            profile.network_json = network_json
-            db.add(profile)
-            db.commit()
-
-    return ProvisionOut(
-        agent_id=agent.id,
-        token=agent.agent_token,
-        vm_name=inp.name,
-        address_name=address_name,
-        instance=instance,
-        timeline=timeline,
-        network_json=network_json,
+    provision = _create_provision(db, inp.name, inp.profile_id)
+    _log_step(
+        timeline,
+        "start_provision",
+        {"vm_name": inp.name, "profile_id": inp.profile_id},
+        db=db,
+        provision=provision,
+        status="running",
     )
+    return _run_provision(db, inp, provision, timeline, address_name)
 
 
 @router.get("/agent.py", response_class=PlainTextResponse)
@@ -415,6 +596,69 @@ def enable_compute_projects(
             pass
         out.append(ProjectItem(project_id=p.project_id, is_active=bool(p.is_active)))
     return ProjectListOut(data=out)
+
+
+@router.post("/ops/create-ip")
+def ops_create_ip(inp: OpsCreateIpIn, _=Depends(_auth)):
+    _ensure_name(inp.name)
+    return create_address(inp.name, description=inp.description, project_id=inp.project_id)
+
+
+@router.post("/ops/create-vm")
+def ops_create_vm(inp: OpsCreateVmIn, _=Depends(_auth)):
+    _ensure_name(inp.name)
+    if inp.address_name:
+        _ensure_name(inp.address_name)
+    zone = defaults(project_id=inp.project_id).get("zone")
+    return create_instance(
+        name=inp.name,
+        address_name=inp.address_name,
+        machine_type=inp.machine_type,
+        startup_script=inp.startup_script,
+        disk_size_gb=inp.disk_size_gb,
+        project_id=inp.project_id,
+        zone=zone,
+    )
+
+
+@router.post("/ops/startup-script", response_model=OpsStartupScriptOut)
+def ops_startup_script(vm_name: str, agent_id: int, agent_token: str) -> OpsStartupScriptOut:
+    return OpsStartupScriptOut(startup_script=_startup_script(_API_BASE, agent_id, agent_token, vm_name))
+
+
+@router.post("/ops/set-startup")
+def ops_set_startup(inp: OpsSetStartupIn, _=Depends(_auth)):
+    zone = defaults(project_id=inp.project_id).get("zone")
+    return set_startup_script(inp.project_id, zone, inp.instance_name, inp.startup_script)
+
+
+@router.get("/ops/projects-status", response_model=OpsProjectStatusOut)
+def ops_projects_status(db: Session = Depends(get_db), _=Depends(_auth)) -> OpsProjectStatusOut:
+    projects = db.execute(select(NaveProject).order_by(NaveProject.id.asc())).scalars().all()
+    out = []
+    for p in projects:
+        compute_enabled = None
+        quota_in_use = None
+        quota_limit = None
+        try:
+            status = get_service_status(p.project_id, "compute.googleapis.com")
+            compute_enabled = status.get("state") == "ENABLED"
+        except Exception:
+            compute_enabled = None
+        try:
+            quotas = get_region_quotas(project_id=p.project_id)
+            info = quotas.get("IN_USE_ADDRESSES") or {}
+            quota_in_use = info.get("usage")
+            quota_limit = info.get("limit")
+        except Exception:
+            pass
+        out.append(OpsProjectStatusItem(
+            project_id=p.project_id,
+            compute_enabled=compute_enabled,
+            quota_in_use=quota_in_use,
+            quota_limit=quota_limit,
+        ))
+    return OpsProjectStatusOut(data=out)
 
 
 @router.post("/projects/register", response_model=ProjectListOut)
