@@ -7,7 +7,7 @@ import jwt
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .db import get_db
@@ -88,6 +88,19 @@ def list_profiles(
         for p in profiles
     ]
     return ProfileListOut(data=out)
+
+
+@router.get("/debug")
+def debug_status(db: Session = Depends(get_db)):
+    info = {"ok": True}
+    try:
+        db.execute(text("SELECT 1"))
+        info["db"] = "ok"
+    except Exception as exc:
+        info["db"] = f"error: {exc}"
+        info["ok"] = False
+    info["time"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    return info
 
 
 @router.post("/profiles", response_model=ProfileCreateOut)

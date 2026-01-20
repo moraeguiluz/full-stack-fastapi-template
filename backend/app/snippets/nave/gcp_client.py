@@ -21,7 +21,7 @@ _GCP_NETWORK = "global/networks/default"
 _GCP_SUBNETWORK = f"regions/{_GCP_REGION}/subnetworks/default"
 _GCP_INSTANCE_SA_EMAIL = ""
 
-_SCOPE = "https://www.googleapis.com/auth/compute"
+_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 
 def _require_config() -> None:
@@ -35,6 +35,11 @@ def _load_sa_info() -> Dict[str, Any]:
         return json.loads(base64.b64decode(_GCP_SA_B64).decode("utf-8"))
     except Exception:
         raise HTTPException(503, "GCP no configurado (GCP_SA_KEY_B64 invalido)")
+
+
+def service_account_email() -> str:
+    info = _load_sa_info()
+    return info.get("client_email", "")
 
 
 def _credentials():
@@ -118,9 +123,10 @@ def wait_global_op(project: str, op_name: str, timeout_s: int = 120) -> None:
         time.sleep(2)
 
 
-def defaults() -> Dict[str, str]:
+def defaults(project_id: Optional[str] = None) -> Dict[str, str]:
+    project_id = project_id or _GCP_PROJECT_ID
     return {
-        "project_id": _GCP_PROJECT_ID,
+        "project_id": project_id,
         "region": _GCP_REGION,
         "zone": _GCP_ZONE,
         "machine_type": _GCP_MACHINE,
@@ -130,16 +136,16 @@ def defaults() -> Dict[str, str]:
     }
 
 
-def get_address(name: str, region: Optional[str] = None) -> Dict[str, Any]:
-    cfg = defaults()
+def get_address(name: str, region: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    cfg = defaults(project_id)
     region = region or cfg["region"]
     url = _region_url(cfg["project_id"], region, f"addresses/{name}")
     return _request("GET", url)
 
 
 def create_address(name: str, region: Optional[str] = None,
-                   description: Optional[str] = None) -> Dict[str, Any]:
-    cfg = defaults()
+                   description: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    cfg = defaults(project_id)
     region = region or cfg["region"]
     url = _region_url(cfg["project_id"], region, "addresses")
     body: Dict[str, Any] = {
@@ -150,11 +156,11 @@ def create_address(name: str, region: Optional[str] = None,
         body["description"] = description
     op = _request("POST", url, body=body)
     wait_region_op(cfg["project_id"], region, op.get("name", ""))
-    return get_address(name, region)
+    return get_address(name, region, project_id=cfg["project_id"])
 
 
-def get_instance(name: str, zone: Optional[str] = None) -> Dict[str, Any]:
-    cfg = defaults()
+def get_instance(name: str, zone: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    cfg = defaults(project_id)
     zone = zone or cfg["zone"]
     url = _zone_url(cfg["project_id"], zone, f"instances/{name}")
     return _request("GET", url)
@@ -169,8 +175,9 @@ def create_instance(
     tags: Optional[list[str]] = None,
     disk_size_gb: Optional[int] = None,
     preemptible: bool = False,
+    project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    cfg = defaults()
+    cfg = defaults(project_id)
     zone = zone or cfg["zone"]
     machine_type = machine_type or cfg["machine_type"]
 
@@ -186,7 +193,7 @@ def create_instance(
     }
 
     if address_name:
-        address = get_address(address_name, cfg["region"]).get("address")
+        address = get_address(address_name, cfg["region"], project_id=cfg["project_id"]).get("address")
         if not address:
             raise HTTPException(404, "IP estatica no encontrada")
         network_interface["accessConfigs"][0]["natIP"] = address
@@ -236,11 +243,11 @@ def create_instance(
     url = _zone_url(cfg["project_id"], zone, "instances")
     op = _request("POST", url, body=instance)
     wait_zone_op(cfg["project_id"], zone, op.get("name", ""))
-    return get_instance(name, zone)
+    return get_instance(name, zone, project_id=cfg["project_id"])
 
 
-def get_firewall(name: str) -> Dict[str, Any]:
-    cfg = defaults()
+def get_firewall(name: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+    cfg = defaults(project_id)
     url = _global_url(cfg["project_id"], f"firewalls/{name}")
     return _request("GET", url)
 
@@ -251,8 +258,9 @@ def create_firewall_rule(
     target_tags: Optional[list[str]] = None,
     allowed: Optional[list[Dict[str, Any]]] = None,
     description: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    cfg = defaults()
+    cfg = defaults(project_id)
     url = _global_url(cfg["project_id"], "firewalls")
     body: Dict[str, Any] = {
         "name": name,
@@ -267,4 +275,18 @@ def create_firewall_rule(
         body["description"] = description
     op = _request("POST", url, body=body)
     wait_global_op(cfg["project_id"], op.get("name", ""))
-    return get_firewall(name)
+    return get_firewall(name, project_id=cfg["project_id"])
+
+
+def get_region_quotas(region: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    cfg = defaults(project_id)
+    region = region or cfg["region"]
+    url = _region_url(cfg["project_id"], region, "")
+    region_data = _request("GET", url)
+    quotas = region_data.get("quotas") or []
+    out = {}
+    for q in quotas:
+        metric = q.get("metric")
+        if metric:
+            out[metric] = {"limit": q.get("limit"), "usage": q.get("usage")}
+    return out

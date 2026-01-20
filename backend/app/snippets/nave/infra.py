@@ -20,9 +20,18 @@ from .gcp_client import (
     get_instance,
     get_firewall,
     create_firewall_rule,
+    get_region_quotas,
+    service_account_email,
+)
+from .gcp_admin import (
+    ensure_navigator_folder,
+    create_project,
+    set_billing,
+    enable_service,
+    add_project_iam_member,
 )
 from .db import get_db, now_utc
-from .models import NaveExit, NaveProfile
+from .models import NaveExit, NaveProfile, NaveProject
 from .schemas import (
     AgentBootstrapIn,
     AgentBootstrapOut,
@@ -130,6 +139,58 @@ def _create_agent(db: Session, profile_id: Optional[int], name: Optional[str]) -
     return agent
 
 
+def _active_project(db: Session) -> Optional[NaveProject]:
+    stmt = select(NaveProject).where(NaveProject.is_active.is_(True)).order_by(NaveProject.id.desc())
+    return db.execute(stmt).scalar_one_or_none()
+
+
+def _ensure_project(db: Session) -> NaveProject:
+    project = _active_project(db)
+    if not project:
+        project = NaveProject(project_id=defaults().get("project_id"), is_active=True)
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+    return project
+
+
+def _project_has_quota(project_id: str) -> bool:
+    quotas = get_region_quotas(project_id=project_id)
+    info = quotas.get("IN_USE_ADDRESSES")
+    if not info:
+        return True
+    usage = info.get("usage") or 0
+    limit = info.get("limit") or 0
+    return usage < limit
+
+
+def _create_new_project(db: Session, base_project_id: str) -> NaveProject:
+    folder_id = ensure_navigator_folder(base_project_id)
+    suffix = int(now_utc().timestamp())
+    project_id = f"nave-{suffix}"
+    display_name = f"Nave {suffix}"
+    create_project(project_id=project_id, display_name=display_name, parent=folder_id)
+    set_billing(project_id)
+    member = service_account_email()
+    if member:
+        sa_member = f"serviceAccount:{member}"
+        add_project_iam_member(project_id, sa_member, "roles/compute.admin")
+        add_project_iam_member(project_id, sa_member, "roles/compute.securityAdmin")
+        add_project_iam_member(project_id, sa_member, "roles/serviceusage.serviceUsageAdmin")
+    enable_service(project_id, "compute.googleapis.com")
+    project = NaveProject(
+        project_id=project_id,
+        display_name=display_name,
+        folder_id=folder_id,
+        is_active=True,
+        meta_json={"created_from": base_project_id},
+    )
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
 def _agent_from_token(
     db: Session, agent_id: int, token: Optional[str]
 ) -> NaveExit:
@@ -193,9 +254,16 @@ def provision_vm(
     agent = _create_agent(db, inp.profile_id, inp.name)
     script = _startup_script(_API_BASE, agent.id, agent.agent_token, inp.name)
 
+    project = _ensure_project(db)
+    if not _project_has_quota(project.project_id):
+        project.is_active = False
+        db.add(project)
+        db.commit()
+        project = _create_new_project(db, defaults().get("project_id"))
+
     tags = ["nave-wg"]
     try:
-        get_firewall("nave-wg-udp-51820")
+        get_firewall("nave-wg-udp-51820", project_id=project.project_id)
     except HTTPException as err:
         if err.status_code != 404:
             raise
@@ -204,10 +272,11 @@ def provision_vm(
             target_tags=tags,
             allowed=[{"IPProtocol": "udp", "ports": ["51820"]}],
             description="Nave WireGuard UDP 51820",
+            project_id=project.project_id,
         )
 
     if inp.create_ip:
-        create_address(address_name, description=f"nave:{inp.name}")
+        create_address(address_name, description=f"nave:{inp.name}", project_id=project.project_id)
 
     instance = create_instance(
         name=inp.name,
@@ -217,6 +286,7 @@ def provision_vm(
         tags=tags,
         disk_size_gb=inp.disk_size_gb,
         preemptible=inp.preemptible,
+        project_id=project.project_id,
     )
 
     public_ip = None
@@ -243,7 +313,7 @@ def provision_vm(
                 "public_ip": public_ip,
                 "zone": defaults().get("zone"),
                 "region": defaults().get("region"),
-                "project_id": defaults().get("project_id"),
+                "project_id": project.project_id,
                 "agent_id": agent.id,
                 "instance_json": instance,
             }

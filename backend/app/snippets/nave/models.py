@@ -48,6 +48,28 @@ class NaveUser(BaseOwn):
     )
 
 
+class NaveProject(BaseOwn):
+    __tablename__ = "app_nave_project"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(String(64), index=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+    folder_id: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    meta_json: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        index=True,
+    )
+
+
 class NaveExit(BaseOwn):
     __tablename__ = "app_nave_exit"
 
