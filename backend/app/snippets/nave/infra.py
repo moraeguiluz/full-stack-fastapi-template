@@ -315,6 +315,22 @@ def get_agent_script():
     return script.replace("__API_BASE__", _API_BASE)
 
 
+@router.post("/projects/enable-compute", response_model=ProjectListOut)
+def enable_compute_projects(
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ProjectListOut:
+    projects = db.execute(select(NaveProject).order_by(NaveProject.id.asc())).scalars().all()
+    out = []
+    for p in projects:
+        try:
+            enable_service(p.project_id, "compute.googleapis.com")
+        except Exception:
+            pass
+        out.append(ProjectItem(project_id=p.project_id, is_active=bool(p.is_active)))
+    return ProjectListOut(data=out)
+
+
 @router.post("/projects/register", response_model=ProjectListOut)
 def register_projects(
     inp: ProjectRegisterIn,
