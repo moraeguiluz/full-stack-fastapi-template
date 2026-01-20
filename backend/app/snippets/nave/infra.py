@@ -287,7 +287,7 @@ def provision_vm(
     script = _startup_script(_API_BASE, agent.id, agent.agent_token, inp.name)
 
     try:
-    project = _pick_project(db, timeline)
+        project = _pick_project(db, timeline)
     except HTTPException as err:
         detail = err.detail if isinstance(err.detail, dict) else {"message": err.detail}
         detail["timeline"] = detail.get("timeline") or timeline
