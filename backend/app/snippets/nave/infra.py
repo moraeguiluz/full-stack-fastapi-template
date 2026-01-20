@@ -145,7 +145,10 @@ def _create_agent(db: Session, profile_id: Optional[int], name: Optional[str]) -
 
 
 def _project_has_quota(project_id: str) -> bool:
-    quotas = get_region_quotas(project_id=project_id)
+    try:
+        quotas = get_region_quotas(project_id=project_id)
+    except HTTPException:
+        return False
     info = quotas.get("IN_USE_ADDRESSES")
     if not info:
         return True
@@ -168,6 +171,19 @@ def _retry_if_compute_disabled(project_id: str, fn):
 def _pick_project(db: Session) -> NaveProject:
     projects = db.execute(select(NaveProject).order_by(NaveProject.id.asc())).scalars().all()
     if not projects:
+        defaults_list = [
+            "bonube-cloud",
+            "plan-guerrero",
+            "politicomap",
+            "programarmexico-285403",
+            "vppn-478611",
+        ]
+        for pid in defaults_list:
+            proj = NaveProject(project_id=pid, is_active=True)
+            db.add(proj)
+        db.commit()
+        projects = db.execute(select(NaveProject).order_by(NaveProject.id.asc())).scalars().all()
+    if not projects:
         raise HTTPException(503, "No hay proyectos registrados")
     chosen = None
     for proj in projects:
@@ -182,7 +198,7 @@ def _pick_project(db: Session) -> NaveProject:
                 proj.is_active = False
     db.commit()
     if not chosen:
-        raise HTTPException(503, "No hay proyectos con cuota de IP")
+        raise HTTPException(503, "No mas servidores por el momento, habla con el desarrollador.")
     return chosen
 
 
