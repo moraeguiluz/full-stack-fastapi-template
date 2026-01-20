@@ -116,8 +116,10 @@ def enable_service(project_id: str, service: str, timeout_s: int = 300) -> None:
                 "POST",
                 _serviceusage_url(f"projects/{project_id}/services/{service}:enable"),
             )
+            if op.get("done") is True:
+                return
             name = op.get("name")
-            if not name:
+            if not name or name.endswith("DONE_OPERATION"):
                 return
             while True:
                 status = _request("GET", _serviceusage_url(name))
