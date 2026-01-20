@@ -29,6 +29,7 @@ from .gcp_admin import (
     set_billing,
     enable_service,
     add_project_iam_member,
+    enable_core_services,
 )
 from .db import get_db, now_utc
 from .models import NaveExit, NaveProfile, NaveProject
@@ -165,6 +166,7 @@ def _project_has_quota(project_id: str) -> bool:
 
 
 def _create_new_project(db: Session, base_project_id: str) -> NaveProject:
+    enable_core_services(base_project_id)
     folder_id = ensure_navigator_folder(base_project_id)
     suffix = int(now_utc().timestamp())
     project_id = f"nave-{suffix}"

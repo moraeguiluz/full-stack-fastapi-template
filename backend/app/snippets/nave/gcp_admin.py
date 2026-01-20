@@ -122,6 +122,13 @@ def enable_service(project_id: str, service: str) -> None:
         time.sleep(2)
 
 
+def enable_core_services(project_id: str) -> None:
+    # Required for folders/projects/billing flows
+    enable_service(project_id, "cloudresourcemanager.googleapis.com")
+    enable_service(project_id, "cloudbilling.googleapis.com")
+    enable_service(project_id, "serviceusage.googleapis.com")
+
+
 def ensure_navigator_folder(project_id: str) -> str:
     parent = get_project_parent(project_id)
     return find_or_create_folder(parent, _FOLDER_NAME)
