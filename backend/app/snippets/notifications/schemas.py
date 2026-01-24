@@ -8,6 +8,7 @@ class NotificationCreateIn(BaseModel):
     user_id: Optional[int] = None
     broadcast: bool = False
     codigo_base: Optional[str] = Field(default=None, max_length=64)
+    delay_seconds: int = Field(default=0, ge=0, le=3600)
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=4000)
     type: str = Field(default="general", max_length=64)
@@ -31,3 +32,13 @@ class NotificationListOut(BaseModel):
 
 class NotificationCreateOut(BaseModel):
     created: int
+    scheduled: int = 0
+
+
+class DeviceTokenRegisterIn(BaseModel):
+    token: str = Field(min_length=20, max_length=4096)
+    platform: Optional[str] = Field(default=None, max_length=32)
+
+
+class DeviceTokenUnregisterIn(BaseModel):
+    token: str = Field(min_length=20, max_length=4096)

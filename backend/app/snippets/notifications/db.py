@@ -53,5 +53,12 @@ def get_db():
         db.close()
 
 
+def create_session() -> Session:
+    _init_db()
+    if not _SessionLocal:
+        raise HTTPException(status_code=503, detail="DB no configurada (falta DATABASE_URL)")
+    return _SessionLocal()
+
+
 def now_utc() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)

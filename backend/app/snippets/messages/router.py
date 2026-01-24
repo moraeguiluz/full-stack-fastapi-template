@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .db import get_db, now_utc
 from .models import MessageThread, Message, MessageThreadMember, UserAuth, UserProfile
 from ..realtime.manager import connection_manager
+from ..notifications.fcm import send_to_user as send_fcm_to_user
 from .schemas import (
     ThreadOut,
     ThreadListOut,
@@ -84,14 +85,32 @@ def _notify_message(thread: MessageThread, msg: Message, sender_id: int, db: Ses
         for uid in member_ids:
             if uid == sender_id:
                 continue
-            connection_manager.send_to_user_sync(int(uid), payload)
+            if connection_manager.has_user_sync(int(uid)):
+                connection_manager.send_to_user_sync(int(uid), payload)
+            else:
+                send_fcm_to_user(
+                    db,
+                    int(uid),
+                    "Nuevo mensaje",
+                    msg.text[:120],
+                    {"thread_id": msg.thread_id, "message_id": msg.id},
+                )
         return
 
     other_id = (
         thread.user_high_id if thread.user_low_id == sender_id else thread.user_low_id
     )
     if other_id is not None:
-        connection_manager.send_to_user_sync(int(other_id), payload)
+        if connection_manager.has_user_sync(int(other_id)):
+            connection_manager.send_to_user_sync(int(other_id), payload)
+        else:
+            send_fcm_to_user(
+                db,
+                int(other_id),
+                "Nuevo mensaje",
+                msg.text[:120],
+                {"thread_id": msg.thread_id, "message_id": msg.id},
+            )
 
 
 @router.get("/users", response_model=UserListOut)
