@@ -55,8 +55,9 @@ def _send_fcm_if_needed(
     title: str,
     body: str,
     data: Optional[dict],
+    force_fcm: bool = False,
 ) -> None:
-    if connection_manager.has_user_sync(target_user_id):
+    if not force_fcm and connection_manager.has_user_sync(target_user_id):
         return
     send_fcm_to_user(db, target_user_id, title, body, data)
 
@@ -67,6 +68,7 @@ def _dispatch_notifications(
     notif_body: str,
     notif_type: str,
     data: Optional[dict],
+    force_fcm: bool,
 ) -> int:
     db = create_session()
     created = 0
@@ -96,7 +98,7 @@ def _dispatch_notifications(
                     },
                 )
             else:
-                _send_fcm_if_needed(db, int(target_user_id), title, notif_body, data)
+                _send_fcm_if_needed(db, int(target_user_id), title, notif_body, data, force_fcm)
         db.commit()
     finally:
         db.close()
@@ -141,7 +143,14 @@ def create_notification(
 
         def _delayed() -> None:
             time.sleep(delay)
-            _dispatch_notifications(target_ids, title, notif_body, notif_type, body.data)
+            _dispatch_notifications(
+                target_ids,
+                title,
+                notif_body,
+                notif_type,
+                body.data,
+                body.force_fcm,
+            )
 
         background_tasks.add_task(_delayed)
         return NotificationCreateOut(created=0, scheduled=len(target_ids))
@@ -172,7 +181,14 @@ def create_notification(
                 },
             )
         else:
-            _send_fcm_if_needed(db, int(target_user_id), title, notif_body, body.data)
+            _send_fcm_if_needed(
+                db,
+                int(target_user_id),
+                title,
+                notif_body,
+                body.data,
+                body.force_fcm,
+            )
 
     db.commit()
     return NotificationCreateOut(created=created)

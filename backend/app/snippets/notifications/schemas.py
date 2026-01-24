@@ -9,6 +9,7 @@ class NotificationCreateIn(BaseModel):
     broadcast: bool = False
     codigo_base: Optional[str] = Field(default=None, max_length=64)
     delay_seconds: int = Field(default=0, ge=0, le=3600)
+    force_fcm: bool = False
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=4000)
     type: str = Field(default="general", max_length=64)
