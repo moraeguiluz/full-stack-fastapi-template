@@ -69,7 +69,13 @@ def _ensure_member(thread: MessageThread, user_id: int, db: Session) -> None:
         raise HTTPException(404, "Thread no encontrado")
 
 
-def _notify_message(thread: MessageThread, msg: Message, sender_id: int, db: Session) -> None:
+def _notify_message(
+    thread: MessageThread,
+    msg: Message,
+    sender_id: int,
+    db: Session,
+    force_fcm: bool = False,
+) -> None:
     payload = {
         "type": "message:new",
         "thread_id": msg.thread_id,
@@ -88,7 +94,7 @@ def _notify_message(thread: MessageThread, msg: Message, sender_id: int, db: Ses
                 continue
             if connection_manager.has_user_sync(int(uid)):
                 connection_manager.send_to_user_sync(int(uid), payload)
-            else:
+            if force_fcm or not connection_manager.has_user_sync(int(uid)):
                 send_fcm_to_user(
                     db,
                     int(uid),
@@ -104,7 +110,7 @@ def _notify_message(thread: MessageThread, msg: Message, sender_id: int, db: Ses
     if other_id is not None:
         if connection_manager.has_user_sync(int(other_id)):
             connection_manager.send_to_user_sync(int(other_id), payload)
-        else:
+        if force_fcm or not connection_manager.has_user_sync(int(other_id)):
             send_fcm_to_user(
                 db,
                 int(other_id),
@@ -452,7 +458,7 @@ def admin_send_message_to_me(
     db.add(thread)
     db.commit()
     db.refresh(msg)
-    _notify_message(thread, msg, sender_id, db)
+    _notify_message(thread, msg, sender_id, db, force_fcm=True)
     return MessageOut(
         id=msg.id,
         thread_id=msg.thread_id,

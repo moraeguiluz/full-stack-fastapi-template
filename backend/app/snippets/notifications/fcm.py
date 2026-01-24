@@ -61,6 +61,13 @@ def send_to_token(token: str, title: str, body: str, data: Optional[Dict[str, An
         _log.warning("FCM no configurado (token/proyecto faltante)")
         return False
 
+    thread_id = None
+    if data and data.get("thread_id"):
+        try:
+            thread_id = str(data.get("thread_id"))
+        except Exception:
+            thread_id = None
+
     payload = {
         "message": {
             "token": token,
@@ -69,7 +76,14 @@ def send_to_token(token: str, title: str, body: str, data: Optional[Dict[str, An
                 "body": body,
             },
             "data": _stringify_data(data),
-            "android": {"priority": "high"},
+            "android": {
+                "priority": "high",
+                **(
+                    {"notification": {"tag": f"thread_{thread_id}"}}
+                    if thread_id
+                    else {}
+                ),
+            },
             "apns": {"headers": {"apns-priority": "10"}},
         }
     }
