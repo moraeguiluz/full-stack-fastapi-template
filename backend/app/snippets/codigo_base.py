@@ -165,6 +165,19 @@ class CodigoBaseRequestJoinOut(BaseModel):
         from_attributes = True
 
 
+class CodigoBasePublicOut(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = None
+    admin_id: Optional[int] = None
+    allow_any: bool
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
 # --- Admin: miembros / solicitudes ---
 class CodigoBaseAdminMemberOut(BaseModel):
     membership_id: int
@@ -472,6 +485,41 @@ def mis_codigos_base(
         )
 
     return out
+
+
+@router.get("/todos", response_model=List[CodigoBasePublicOut])
+def listar_todos_codigos_base(
+    q: Optional[str] = None,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    _ = uid
+    q = (q or "").strip()
+    stmt = select(CodigoBase).where(
+        CodigoBase.is_active == True,  # noqa: E712
+    )
+    if q:
+        like = f"%{q}%"
+        stmt = stmt.where(
+            (CodigoBase.codigo.ilike(like)) | (CodigoBase.nombre.ilike(like))
+        )
+    rows = db.execute(
+        stmt.order_by(CodigoBase.nombre.asc(), CodigoBase.codigo.asc()).limit(limit)
+    ).scalars().all()
+
+    return [
+        CodigoBasePublicOut(
+            id=cb.id,
+            codigo=cb.codigo,
+            nombre=cb.nombre,
+            descripcion=cb.descripcion or None,
+            admin_id=cb.admin_id,
+            allow_any=cb.allow_any,
+            is_active=cb.is_active,
+        )
+        for cb in rows
+    ]
 
 
 # ================= ADMIN: miembros y solicitudes =================

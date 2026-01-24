@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .db import get_db, now_utc
 from .models import MessageThread, Message, MessageThreadMember, UserAuth, UserProfile
+from ..realtime.manager import connection_manager
 from .schemas import (
     ThreadOut,
     ThreadListOut,
@@ -64,6 +65,33 @@ def _ensure_member(thread: MessageThread, user_id: int, db: Session) -> None:
     member = db.execute(stmt).scalar_one_or_none()
     if member is None:
         raise HTTPException(404, "Thread no encontrado")
+
+
+def _notify_message(thread: MessageThread, msg: Message, sender_id: int, db: Session) -> None:
+    payload = {
+        "type": "message:new",
+        "thread_id": msg.thread_id,
+        "message_id": msg.id,
+        "sender_id": sender_id,
+        "text": msg.text,
+        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+    }
+    if thread.is_group:
+        member_stmt = select(MessageThreadMember.user_id).where(
+            MessageThreadMember.thread_id == thread.id
+        )
+        member_ids = [row[0] for row in db.execute(member_stmt).all()]
+        for uid in member_ids:
+            if uid == sender_id:
+                continue
+            connection_manager.send_to_user_sync(int(uid), payload)
+        return
+
+    other_id = (
+        thread.user_high_id if thread.user_low_id == sender_id else thread.user_low_id
+    )
+    if other_id is not None:
+        connection_manager.send_to_user_sync(int(other_id), payload)
 
 
 @router.get("/users", response_model=UserListOut)
@@ -306,6 +334,7 @@ def send_message(
     db.add(thread)
     db.commit()
     db.refresh(msg)
+    _notify_message(thread, msg, user_id, db)
     return MessageOut(
         id=msg.id,
         thread_id=msg.thread_id,
@@ -352,6 +381,7 @@ def send_message_to_user(
     db.add(thread)
     db.commit()
     db.refresh(msg)
+    _notify_message(thread, msg, user_id, db)
     return MessageOut(
         id=msg.id,
         thread_id=msg.thread_id,
