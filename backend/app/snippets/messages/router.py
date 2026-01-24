@@ -19,6 +19,7 @@ from .schemas import (
     MessageOut,
     MessageListOut,
     MessageCreateIn,
+    AdminMessageToMeIn,
     GroupCreateIn,
     GroupMembersAddIn,
     UserListOut,
@@ -401,6 +402,57 @@ def send_message_to_user(
     db.commit()
     db.refresh(msg)
     _notify_message(thread, msg, user_id, db)
+    return MessageOut(
+        id=msg.id,
+        thread_id=msg.thread_id,
+        sender_id=msg.sender_id,
+        text=msg.text,
+        delivered_at=msg.delivered_at,
+        read_at=msg.read_at,
+        is_deleted=msg.is_deleted,
+        created_at=msg.created_at,
+    )
+
+
+@router.post("/admin/send-to-me", response_model=MessageOut)
+def admin_send_message_to_me(
+    body: AdminMessageToMeIn,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2),
+) -> MessageOut:
+    recipient_id = _decode_uid(token)
+    sender_id = int(body.sender_id)
+    if sender_id == recipient_id:
+        raise HTTPException(400, "El remitente no puede ser el mismo usuario")
+
+    sender = db.get(UserAuth, sender_id)
+    if sender is None:
+        raise HTTPException(404, "Remitente no encontrado")
+
+    low_id, high_id = _pair(sender_id, recipient_id)
+    stmt = select(MessageThread).where(
+        MessageThread.user_low_id == low_id, MessageThread.user_high_id == high_id
+    )
+    thread = db.execute(stmt).scalar_one_or_none()
+    if thread is None:
+        thread = MessageThread(user_low_id=low_id, user_high_id=high_id, updated_at=now_utc())
+        db.add(thread)
+        db.commit()
+        db.refresh(thread)
+    elif thread.is_group:
+        raise HTTPException(400, "Thread invalido para mensaje directo")
+
+    msg = Message(thread_id=thread.id, sender_id=sender_id, text=body.text)
+    thread.last_message_text = body.text[:200]
+    thread.last_message_at = now_utc()
+    thread.last_sender_id = sender_id
+    thread.updated_at = now_utc()
+
+    db.add(msg)
+    db.add(thread)
+    db.commit()
+    db.refresh(msg)
+    _notify_message(thread, msg, sender_id, db)
     return MessageOut(
         id=msg.id,
         thread_id=msg.thread_id,

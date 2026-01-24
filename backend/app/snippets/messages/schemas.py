@@ -46,6 +46,11 @@ class MessageCreateIn(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
 
 
+class AdminMessageToMeIn(BaseModel):
+    sender_id: int
+    text: str = Field(min_length=1, max_length=4000)
+
+
 class GroupCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     member_ids: List[int] = Field(default_factory=list)
