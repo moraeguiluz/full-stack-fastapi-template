@@ -310,3 +310,29 @@ def unregister_device(
     db.add(existing)
     db.commit()
     return {"ok": True, "updated": True}
+
+
+@router.get("/devices/me")
+def list_my_devices(
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2),
+) -> dict:
+    ensure_db()
+    user_id = _decode_uid(token)
+    stmt = select(
+        DeviceTokenForNotifications.token,
+        DeviceTokenForNotifications.platform,
+        DeviceTokenForNotifications.revoked_at,
+    ).where(DeviceTokenForNotifications.user_id == user_id)
+    rows = db.execute(stmt).all()
+    return {
+        "count": len(rows),
+        "tokens": [
+            {
+                "token_last4": (t[-4:] if t else ""),
+                "platform": p,
+                "revoked_at": r,
+            }
+            for (t, p, r) in rows
+        ],
+    }

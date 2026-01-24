@@ -2,6 +2,7 @@ import base64
 import json
 from typing import Any, Dict, Optional
 
+import logging
 import requests
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
@@ -15,6 +16,7 @@ _SA_B64 = None
 _creds = None
 _project_id = None
 _inited = False
+_log = logging.getLogger("uvicorn.error")
 
 
 def _init_fcm() -> None:
@@ -56,6 +58,7 @@ def _stringify_data(data: Optional[Dict[str, Any]]) -> Dict[str, str]:
 def send_to_token(token: str, title: str, body: str, data: Optional[Dict[str, Any]] = None) -> bool:
     access_token, project_id = _access_token()
     if not access_token or not project_id:
+        _log.warning("FCM no configurado (token/proyecto faltante)")
         return False
 
     payload = {
@@ -66,6 +69,8 @@ def send_to_token(token: str, title: str, body: str, data: Optional[Dict[str, An
                 "body": body,
             },
             "data": _stringify_data(data),
+            "android": {"priority": "high"},
+            "apns": {"headers": {"apns-priority": "10"}},
         }
     }
 
@@ -77,8 +82,11 @@ def send_to_token(token: str, title: str, body: str, data: Optional[Dict[str, An
 
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        if resp.status_code >= 300:
+            _log.warning("FCM error %s: %s", resp.status_code, resp.text[:400])
         return resp.status_code < 300
     except requests.RequestException:
+        _log.warning("FCM request error", exc_info=True)
         return False
 
 
@@ -94,6 +102,8 @@ def send_to_user(
         DeviceTokenForNotifications.revoked_at.is_(None),
     )
     tokens = [row[0] for row in db.execute(stmt).all()]
+    if not tokens:
+        _log.info("FCM sin tokens para user_id=%s", user_id)
     sent = 0
     for token in tokens:
         if send_to_token(token, title, body, data):
