@@ -97,6 +97,8 @@ def _dispatch_notifications(
                         "created_at": item.created_at.isoformat() if item.created_at else None,
                     },
                 )
+                # Si se pidió forzar, también manda FCM aunque haya WebSocket.
+                _send_fcm_if_needed(db, int(target_user_id), title, notif_body, data, force_fcm)
             else:
                 _send_fcm_if_needed(db, int(target_user_id), title, notif_body, data, force_fcm)
         db.commit()
@@ -179,6 +181,15 @@ def create_notification(
                     "data": item.data,
                     "created_at": item.created_at.isoformat() if item.created_at else None,
                 },
+            )
+            # Si se pidió forzar, también manda FCM aunque haya WebSocket.
+            _send_fcm_if_needed(
+                db,
+                int(target_user_id),
+                title,
+                notif_body,
+                body.data,
+                body.force_fcm,
             )
         else:
             _send_fcm_if_needed(
