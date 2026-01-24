@@ -1,7 +1,7 @@
 import os
 
 import jwt
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from .manager import connection_manager
 
@@ -23,7 +23,10 @@ def _decode_uid(token: str) -> int:
 
 
 @router.websocket("")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
+async def websocket_endpoint(websocket: WebSocket):
+    token = websocket.query_params.get("token", "")
+    if token.startswith("Bearer "):
+        token = token[len("Bearer ") :].strip()
     if not token:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
