@@ -12,8 +12,6 @@ from google.oauth2 import service_account
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.snippets.news import News
-
 
 @dataclass(frozen=True)
 class SeedResult:
@@ -209,6 +207,7 @@ def _upload_if_missing(bucket: storage.Bucket, object_name: str, image_url: str)
 
 def seed_news(
     db: Session,
+    news_model,
     prefix: str = "news/seed",
     items: Iterable[dict] | None = None,
 ) -> SeedResult:
@@ -220,7 +219,7 @@ def seed_news(
     skipped = 0
     for idx, item in enumerate(news_items, start=1):
         existing = db.execute(
-            select(News).where(News.title == item["title"])
+            select(news_model).where(news_model.title == item["title"])
         ).scalar_one_or_none()
         if existing:
             skipped += 1
@@ -229,7 +228,7 @@ def seed_news(
         object_name = _object_name(idx, item["title"], prefix)
         _upload_if_missing(bucket, object_name, item["image_url"])
 
-        n = News(
+        n = news_model(
             title=item["title"],
             summary=item.get("summary"),
             body=item["body"],

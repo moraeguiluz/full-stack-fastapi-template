@@ -4,6 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.seed.news_seed import seed_news
+from app.snippets.news import News
 
 
 def main() -> None:
@@ -17,7 +18,7 @@ def main() -> None:
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
     with SessionLocal() as db:
-        result = seed_news(db)
+        result = seed_news(db, News)
 
     print(
         f"Seeded news: {result.created} created, {result.skipped} skipped, {result.total} total"

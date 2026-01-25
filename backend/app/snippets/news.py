@@ -339,7 +339,7 @@ def admin_seed_news(
     _require_admin(uid)
 
     try:
-        result: SeedResult = seed_news(db)
+        result: SeedResult = seed_news(db, News)
     except Exception as exc:
         raise HTTPException(500, f"No se pudo generar noticias demo: {exc}")
 
