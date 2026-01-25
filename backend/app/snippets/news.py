@@ -24,6 +24,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, Session
 
+from app.seed.news_seed import SeedResult, seed_news
+
 ENABLED = True
 router = APIRouter(tags=["news"])
 
@@ -168,6 +170,12 @@ class NewsPatchIn(BaseModel):
     scope_value: Optional[str] = Field(default=None, max_length=80)
     pinned_until: Optional[dt.datetime] = None
     published_at: Optional[dt.datetime] = None
+
+
+class SeedNewsOut(BaseModel):
+    created: int
+    skipped: int
+    total: int
 
 
 @router.get("/news", response_model=NewsFeedOut)
@@ -320,3 +328,19 @@ def admin_patch_news(
     db.commit()
     db.refresh(item)
     return item
+
+
+@router.post("/news/admin/seed", response_model=SeedNewsOut)
+def admin_seed_news(
+    token: str = Depends(oauth2),
+    db: Session = Depends(get_db),
+) -> SeedNewsOut:
+    uid = _current_user_id(token)
+    _require_admin(uid)
+
+    try:
+        result: SeedResult = seed_news(db)
+    except Exception as exc:
+        raise HTTPException(500, f"No se pudo generar noticias demo: {exc}")
+
+    return SeedNewsOut(created=result.created, skipped=result.skipped, total=result.total)
