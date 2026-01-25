@@ -1,20 +1,19 @@
 # backend/app/main.py
 from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
 import logging
 import importlib
 import pkgutil
 
 app = FastAPI(
     title="API Bonube",
-    openapi_url="/api/v1/openapi.json",  # útil si montas tus rutas bajo /api/v1
-    docs_url="/docs",
-    redoc_url="/redoc",
+    openapi_url=None,
+    docs_url=None,
+    redoc_url=None,
 )
 
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse(url="/docs")
+    return {"ok": True}
 
 @app.get("/health", include_in_schema=False)
 def health():
