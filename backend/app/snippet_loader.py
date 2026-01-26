@@ -8,10 +8,10 @@ def load_snippets(app) -> None:
 
     try:
         from . import snippets as snippets_pkg  # requiere backend/app/snippets/__init__.py
-        prefix = f"{snippets_pkg.__name__}."
-        for m in pkgutil.walk_packages(snippets_pkg.__path__, prefix=prefix):
+        pkg_prefix = f"{snippets_pkg.__name__}."
+        for m in pkgutil.walk_packages(snippets_pkg.__path__, prefix=pkg_prefix):
             modname = m.name
-            relname = modname[len(prefix):]
+            relname = modname[len(pkg_prefix):]
             if "." in relname:
                 leaf = relname.split(".")[-1]
                 if leaf not in ("router", "routes"):
@@ -21,8 +21,8 @@ def load_snippets(app) -> None:
             try:
                 mod = importlib.import_module(modname)
                 if getattr(mod, "ENABLED", True) and hasattr(mod, "router"):
-                    prefix = getattr(mod, "ROUTER_PREFIX", "/api/v1")
-                    app.include_router(mod.router, prefix=prefix)
+                    router_prefix = getattr(mod, "ROUTER_PREFIX", "/api/v1")
+                    app.include_router(mod.router, prefix=router_prefix)
                     loaded.append(relname)
                 else:
                     failed.append((relname, "sin 'router' o deshabilitado"))
