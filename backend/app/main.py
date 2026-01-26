@@ -1,8 +1,10 @@
 # backend/app/main.py
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 import logging
 import importlib
 import pkgutil
+import os
 
 app = FastAPI(
     title="API Bonube",
@@ -11,6 +13,54 @@ app = FastAPI(
     redoc_url=None,
 )
 
+_LEGAL_APP_NAME = os.getenv("LEGAL_APP_NAME", "MEXOR")
+_LEGAL_CONTACT_EMAIL = os.getenv("LEGAL_CONTACT_EMAIL", "info@bonube.com")
+
+_PRIVACY_HTML = f"""<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aviso de privacidad - {_LEGAL_APP_NAME}</title>
+  </head>
+  <body>
+    <main>
+      <h1>Aviso de privacidad</h1>
+      <p>
+        En {_LEGAL_APP_NAME} respetamos tu privacidad. Esta pagina explica de forma
+        general como tratamos los datos personales que nos proporcionas al usar
+        la aplicacion.
+      </p>
+      <p>
+        Para preguntas o solicitudes relacionadas con privacidad, escribenos a
+        <a href="mailto:{_LEGAL_CONTACT_EMAIL}">{_LEGAL_CONTACT_EMAIL}</a>.
+      </p>
+    </main>
+  </body>
+</html>
+"""
+
+_DATA_DELETION_HTML = f"""<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Solicitud de eliminacion de datos - {_LEGAL_APP_NAME}</title>
+  </head>
+  <body>
+    <main>
+      <h1>Solicitud de eliminacion de datos</h1>
+      <p>
+        Si deseas solicitar la eliminacion de tus datos personales, envianos un
+        correo a <a href="mailto:{_LEGAL_CONTACT_EMAIL}">{_LEGAL_CONTACT_EMAIL}</a>
+        con el asunto "Eliminacion de datos" e incluye el correo o identificador
+        asociado a tu cuenta.
+      </p>
+    </main>
+  </body>
+</html>
+"""
+
 @app.get("/", include_in_schema=False)
 def root():
     return {"ok": True}
@@ -18,6 +68,14 @@ def root():
 @app.get("/health", include_in_schema=False)
 def health():
     return {"ok": True}
+
+@app.get("/privacy-policy", response_class=HTMLResponse, include_in_schema=False)
+def aviso_privacidad():
+    return HTMLResponse(content=_PRIVACY_HTML)
+
+@app.get("/data-deletion", response_class=HTMLResponse, include_in_schema=False)
+def eliminacion_datos():
+    return HTMLResponse(content=_DATA_DELETION_HTML)
 
 # -------------------------------------------------------------------
 # Autoload de snippets: carga módulos en app/snippets y subcarpetas que
