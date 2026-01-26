@@ -1,8 +1,9 @@
 import datetime as dt
 import os
 
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Integer, String, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -49,25 +50,59 @@ _DATA_DELETION_HTML = f"""<!doctype html>
     <main>
       <h1>Solicitud de eliminacion de datos</h1>
       <p>Completa el formulario para solicitar la eliminacion de tus datos.</p>
-      <form method="post" action="/data-deletion">
+      <form id="data-deletion-form">
         <label>
           Nombre completo
-          <input name="name" type="text" required />
+          <input id="name" name="name" type="text" required />
         </label>
         <br />
         <label>
           Numero de telefono
-          <input name="phone" type="tel" required />
+          <input id="phone" name="phone" type="tel" required />
         </label>
         <br />
         <label>
           Correo asociado a la cuenta
-          <input name="email" type="email" required />
+          <input id="email" name="email" type="email" required />
         </label>
         <br />
         <button type="submit">Solicitar eliminacion</button>
       </form>
+      <p id="status" role="status" aria-live="polite"></p>
     </main>
+    <script>
+      (function () {{
+        const form = document.getElementById("data-deletion-form");
+        const status = document.getElementById("status");
+        form.addEventListener("submit", async function (ev) {{
+          ev.preventDefault();
+          status.textContent = "Enviando solicitud...";
+          const payload = {{
+            name: document.getElementById("name").value,
+            phone: document.getElementById("phone").value,
+            email: document.getElementById("email").value,
+          }};
+          try {{
+            const res = await fetch("/data-deletion", {{
+              method: "POST",
+              headers: {{"Content-Type": "application/json"}},
+              body: JSON.stringify(payload),
+            }});
+            if (res.ok) {{
+              const html = await res.text();
+              document.open();
+              document.write(html);
+              document.close();
+              return;
+            }}
+            const msg = await res.text();
+            status.textContent = "Error: " + msg;
+          }} catch (err) {{
+            status.textContent = "Error al enviar la solicitud.";
+          }}
+        }});
+      }})();
+    </script>
   </body>
 </html>
 """
@@ -107,6 +142,12 @@ class DataDeletionRequest(LegalBase):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class DataDeletionIn(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+    phone: str = Field(min_length=5, max_length=50)
+    email: str = Field(min_length=5, max_length=320)
 
 
 def _init_legal_db() -> None:
@@ -152,15 +193,13 @@ def eliminacion_datos():
 
 @router.post("/data-deletion", response_class=HTMLResponse)
 def submit_data_deletion(
-    name: str = Form(..., min_length=2, max_length=200),
-    phone: str = Form(..., min_length=5, max_length=50),
-    email: str = Form(..., min_length=5, max_length=320),
+    payload: DataDeletionIn,
     db: Session = Depends(get_legal_db),
 ):
     req = DataDeletionRequest(
-        name=name.strip(),
-        phone=phone.strip(),
-        email=email.strip(),
+        name=payload.name.strip(),
+        phone=payload.phone.strip(),
+        email=payload.email.strip(),
     )
     db.add(req)
     db.commit()
