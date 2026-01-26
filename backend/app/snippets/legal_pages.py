@@ -6,15 +6,13 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import DateTime, Integer, String, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
-from app.core.config import settings
-
 ENABLED = True
 ROUTER_PREFIX = ""
 router = APIRouter(include_in_schema=False)
 
 _LEGAL_APP_NAME = os.getenv("LEGAL_APP_NAME", "MEXOR")
 _LEGAL_CONTACT_EMAIL = os.getenv("LEGAL_CONTACT_EMAIL", "info@bonube.com")
-_LEGAL_DB_URL = os.getenv("DATABASE_URL") or str(settings.SQLALCHEMY_DATABASE_URI)
+_LEGAL_DB_URL = os.getenv("DATABASE_URL")
 
 _PRIVACY_HTML = f"""<!doctype html>
 <html lang="es">
