@@ -257,7 +257,7 @@ def verify_otp(payload: VerifyOtpIn, db: Session = Depends(get_db)):
         payload.code,
         _BYPASS_CODE,
     )
-    if digits == _BYPASS_PHONE_DIGITS and payload.code == _BYPASS_CODE:
+    if digits.endswith(_BYPASS_PHONE_DIGITS) and payload.code == _BYPASS_CODE:
         tel = _normalize_mx(payload.telefono)
         u = db.query(User).filter(User.telefono == tel).first()
         otp_token = _jwt({"otp_phone": tel}, minutes=max(OTP_TOKEN_TTL // 60, 1))
