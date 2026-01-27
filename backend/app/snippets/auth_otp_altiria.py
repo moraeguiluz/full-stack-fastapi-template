@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import os, datetime as dt, random, re, requests, jwt
+import os, datetime as dt, random, re, requests, jwt, logging
 from passlib.context import CryptContext
 
 from sqlalchemy import (
@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column,
 from sqlalchemy.exc import IntegrityError
 
 router = APIRouter(prefix="/auth", tags=["auth-otp"])
+log = logging.getLogger("uvicorn")
 
 # -------------------- Config & lazy init --------------------
 _DB_URL = os.getenv("DATABASE_URL")
@@ -249,6 +250,13 @@ def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
 @router.post("/verify-otp", response_model=VerifyOtpOut)
 def verify_otp(payload: VerifyOtpIn, db: Session = Depends(get_db)):
     digits = _digits_only(payload.telefono)
+    log.info(
+        "OTP bypass check: digits=%s env_phone=%s code=%s env_code=%s",
+        digits,
+        _BYPASS_PHONE_DIGITS,
+        payload.code,
+        _BYPASS_CODE,
+    )
     if digits == _BYPASS_PHONE_DIGITS and payload.code == _BYPASS_CODE:
         tel = _normalize_mx(payload.telefono)
         u = db.query(User).filter(User.telefono == tel).first()
