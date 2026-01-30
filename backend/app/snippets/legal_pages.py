@@ -1,5 +1,6 @@
 import datetime as dt
 import os
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
@@ -12,7 +13,7 @@ ROUTER_PREFIX = ""
 router = APIRouter(include_in_schema=False)
 
 _LEGAL_APP_NAME = os.getenv("LEGAL_APP_NAME", "MEXOR")
-_LEGAL_CONTACT_EMAIL = os.getenv("LEGAL_CONTACT_EMAIL", "info@bonube.com")
+_LEGAL_CONTACT_EMAIL = os.getenv("LEGAL_CONTACT_EMAIL", "info@mexor.app")
 _LEGAL_DB_URL = os.getenv("DATABASE_URL")
 
 _PRIVACY_HTML = f"""<!doctype html>
@@ -273,6 +274,187 @@ _DATA_DELETION_SUCCESS_HTML = """<!doctype html>
 </html>
 """
 
+_CHILD_SAFETY_HTML = f"""<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Estándares de seguridad infantil - {_LEGAL_APP_NAME}</title>
+    <style>
+      :root {{
+        --bg: #f4f6f8;
+        --card: #ffffff;
+        --text: #1e2a32;
+        --muted: #5a6b75;
+        --line: #e6ebef;
+        --accent: #0f4c81;
+        --accent-soft: rgba(15, 76, 129, 0.08);
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        font-family: "Georgia", "Times New Roman", serif;
+        background: var(--bg);
+        color: var(--text);
+      }}
+      .page {{
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 32px 16px;
+      }}
+      .card {{
+        width: min(940px, 92vw);
+        background: var(--card);
+        border: 1px solid var(--line);
+        box-shadow: 0 12px 32px rgba(15, 30, 45, 0.08);
+        padding: 40px 42px;
+      }}
+      h1 {{
+        margin: 0 0 12px;
+        font-size: 28px;
+        letter-spacing: 0.2px;
+      }}
+      .lead {{
+        color: var(--muted);
+        margin: 0 0 20px;
+        line-height: 1.6;
+      }}
+      .section {{
+        margin-top: 18px;
+        line-height: 1.7;
+      }}
+      .section h2 {{
+        margin: 18px 0 8px;
+        font-size: 18px;
+        color: var(--accent);
+      }}
+      .pill {{
+        display: inline-block;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-weight: 600;
+        margin: 6px 0 2px;
+      }}
+      ul {{ padding-left: 18px; }}
+      li {{ margin: 6px 0; }}
+      a {{ color: var(--accent); }}
+      .footer {{
+        margin-top: 22px;
+        padding-top: 16px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+      }}
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="card">
+        <h1>Estándares de seguridad infantil (CSAE)</h1>
+        <p class="lead">
+          En {_LEGAL_APP_NAME} mantenemos una política de tolerancia cero frente a la
+          explotación y el abuso sexual infantil (CSAE). Esta página describe de
+          forma clara cómo prevenimos, detectamos y actuamos frente a cualquier
+          contenido o conducta que ponga en riesgo a menores de edad.
+        </p>
+        <div class="section">
+          <span class="pill">Compromiso público</span>
+          <h2>Principios y conducta prohibida</h2>
+          <p>
+            Prohibimos cualquier contenido, actividad o intento de interacción que
+            involucre explotación, abuso o sexualización de menores. Esto incluye,
+            sin limitarse, material gráfico, solicitud de imágenes, grooming,
+            lenguaje sexual explícito dirigido a menores o cualquier conducta que
+            busque contactar o dañar a una persona menor de edad.
+          </p>
+        </div>
+        <div class="section">
+          <h2>Prevención y controles</h2>
+          <p>
+            Aplicamos controles de acceso, medidas de seguridad y revisión continua
+            de flujos críticos dentro de la app. Cuando un usuario reporta
+            contenido o actividad sospechosa, priorizamos su revisión para actuar
+            de forma inmediata. También mantenemos registros de auditoría y señales
+            internas para detectar patrones de abuso o fraude.
+          </p>
+        </div>
+        <div class="section">
+          <h2>CSAM (material de abuso sexual infantil)</h2>
+          <p>
+            El material de abuso sexual infantil (CSAM) está estrictamente prohibido.
+            Cualquier indicio o reporte de CSAM se atiende con carácter urgente:
+            removemos contenido, suspendemos cuentas, preservamos evidencia y
+            colaboramos con las autoridades competentes.
+          </p>
+        </div>
+        <div class="section">
+          <h2>Reportes y respuesta</h2>
+          <p>
+            Si detectamos conductas relacionadas con CSAE, suspendemos la cuenta,
+            preservamos evidencia relevante y reportamos a las autoridades
+            competentes cuando aplica. Nuestro objetivo es proteger a la comunidad
+            y colaborar con las investigaciones oficiales.
+          </p>
+          <ul>
+            <li>Acción inmediata ante reportes verificados.</li>
+            <li>Bloqueo preventivo de cuentas en casos críticos.</li>
+            <li>Cooperación con autoridades y preservación de evidencia.</li>
+          </ul>
+        </div>
+        <div class="section">
+          <h2>Mecanismo de reporte dentro de la app</h2>
+          <p>
+            La app incluye un canal de retroalimentación y reporte accesible para los
+            usuarios. Cualquier persona puede enviar alertas de seguridad o reportes
+            relacionados con CSAE desde la sección de Opciones.
+          </p>
+        </div>
+        <div class="section">
+          <h2>Cumplimiento legal</h2>
+          <p>
+            {_LEGAL_APP_NAME} cumple con las leyes y normativas aplicables en materia
+            de seguridad infantil, protección de datos y prevención de abuso. Cuando
+            es requerido, cooperamos con autoridades y seguimos los procedimientos
+            legales vigentes.
+          </p>
+        </div>
+        <div class="section">
+          <h2>Educación y cultura de seguridad</h2>
+          <p>
+            Promovemos un entorno seguro a través de guías internas, capacitación
+            del equipo y reglas claras de uso. La seguridad de los menores es
+            prioritaria y no negociable dentro de nuestra plataforma.
+          </p>
+        </div>
+        <div class="section">
+          <h2>Estándares externos publicados</h2>
+          <p>
+            Consulta nuestros estándares contra la explotación y el abuso sexual
+            infantil (CSAE) publicados externamente aquí:
+            <a href="/child-safety" target="_blank" rel="noopener noreferrer">
+              /child-safety
+            </a>
+          </p>
+        </div>
+        <div class="section">
+          <h2>Contacto</h2>
+          <p>
+            Para reportar contenido o solicitar información relacionada con la
+            seguridad infantil, escríbenos a
+            <a href="mailto:{_LEGAL_CONTACT_EMAIL}">{_LEGAL_CONTACT_EMAIL}</a>.
+          </p>
+        </div>
+        <div class="footer">
+          Última actualización: Enero 2026.
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
+"""
+
 _legal_engine = None
 _legal_SessionLocal = None
 _legal_inited = False
@@ -294,9 +476,27 @@ class DataDeletionRequest(LegalBase):
     )
 
 
+class FeedbackMessage(LegalBase):
+    __tablename__ = "app_feedback_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    message: Mapped[str] = mapped_column(String(4000))
+    phone: Mapped[str] = mapped_column(String(50), default="")
+    source: Mapped[str] = mapped_column(String(50), default="in_app")
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class DataDeletionIn(BaseModel):
     name: str = Field(min_length=2, max_length=200)
     phone: str = Field(min_length=5, max_length=50)
+
+
+class FeedbackIn(BaseModel):
+    message: str = Field(min_length=10, max_length=4000)
+    phone: Optional[str] = Field(default=None, max_length=50)
+    source: Optional[str] = Field(default="in_app", max_length=50)
 
 
 def _init_legal_db() -> None:
@@ -353,3 +553,23 @@ def submit_data_deletion(
     db.add(req)
     db.commit()
     return HTMLResponse(content=_DATA_DELETION_SUCCESS_HTML, status_code=201)
+
+
+@router.post("/feedback")
+def submit_feedback(
+    payload: FeedbackIn,
+    db: Session = Depends(get_legal_db),
+):
+    msg = FeedbackMessage(
+        message=payload.message.strip(),
+        phone=(payload.phone or "").strip(),
+        source=(payload.source or "in_app").strip(),
+    )
+    db.add(msg)
+    db.commit()
+    return {"status": "ok"}
+
+
+@router.get("/child-safety", response_class=HTMLResponse)
+def child_safety():
+    return HTMLResponse(content=_CHILD_SAFETY_HTML)
