@@ -19,6 +19,7 @@ from .schemas import (
     ProfileOut,
     ProfileCreateIn,
     ProfileCreateOut,
+    ProfileDeleteOut,
     LoginIn,
     LoginOut,
     BootstrapOut,
@@ -177,6 +178,19 @@ def get_profile(
         created_at=profile.created_at,
         updated_at=profile.updated_at,
     )
+
+
+@router.delete("/profiles/{profile_id}", response_model=ProfileDeleteOut)
+def delete_profile(
+    profile_id: int,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2),
+) -> ProfileDeleteOut:
+    user_id = _decode_uid(token)
+    profile = _get_profile_or_404(db, profile_id, user_id)
+    db.delete(profile)
+    db.commit()
+    return ProfileDeleteOut(ok=True, id=profile_id)
 
 
 @router.get("/profiles/{profile_id}/cookies", response_model=CookiesOut)
