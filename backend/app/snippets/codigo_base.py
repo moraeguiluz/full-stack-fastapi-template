@@ -22,6 +22,7 @@ router = APIRouter(prefix="/codigo-base", tags=["codigo_base"])
 _DB_URL = os.getenv("DATABASE_URL")
 _SECRET = os.getenv("SECRET_KEY", "dev-change-me")
 _ALG = "HS256"
+_SUPER_ADMIN_PHONE_DIGITS = os.getenv("SUPER_ADMIN_LOGIN_PHONE", "0123456789").strip()
 
 _engine = None
 _SessionLocal: Optional[sessionmaker] = None
@@ -70,6 +71,28 @@ def _current_user_id(token: str = Depends(oauth2)) -> int:
 
 def _now_utc() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+def _digits_only(value: Optional[str]) -> str:
+    return "".join(ch for ch in (value or "") if ch.isdigit())
+
+
+def _matches_phone_digits(phone: Optional[str], configured: str) -> bool:
+    phone_digits = _digits_only(phone)
+    configured_digits = _digits_only(configured)
+    return bool(configured_digits) and (
+        phone_digits == configured_digits or phone_digits.endswith(configured_digits)
+    )
+
+
+def _fields_set(model: BaseModel) -> set[str]:
+    return set(
+        getattr(
+            model,
+            "model_fields_set",
+            getattr(model, "__fields_set__", set()),
+        )
+    )
 
 
 # -------- Declarative models --------
@@ -125,6 +148,8 @@ class AppUser(Base):
     nombre: Mapped[Optional[str]] = mapped_column(String(120))
     apellido_paterno: Mapped[Optional[str]] = mapped_column(String(120))
     apellido_materno: Mapped[Optional[str]] = mapped_column(String(120))
+    telefono: Mapped[Optional[str]] = mapped_column(String(32))
+    is_active: Mapped[Optional[bool]] = mapped_column(Boolean, default=True)
 
 
 # -------- Schemas --------
@@ -176,6 +201,38 @@ class CodigoBasePublicOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CodigoBaseAdminCatalogItemOut(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = None
+    creado_por: int
+    admin_id: Optional[int] = None
+    allow_any: bool
+    is_active: bool
+    created_at: Optional[dt.datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CodigoBaseAdminCreateIn(BaseModel):
+    codigo: str = Field(min_length=3, max_length=64)
+    nombre: str = Field(min_length=1, max_length=120)
+    descripcion: Optional[str] = Field(default="", max_length=5000)
+    admin_id: Optional[int] = None
+    allow_any: bool = False
+    is_active: bool = True
+
+
+class CodigoBaseAdminUpdateIn(BaseModel):
+    nombre: Optional[str] = Field(default=None, max_length=120)
+    descripcion: Optional[str] = Field(default=None, max_length=5000)
+    admin_id: Optional[int] = None
+    allow_any: Optional[bool] = None
+    is_active: Optional[bool] = None
 
 
 # --- Admin: miembros / solicitudes ---
@@ -520,6 +577,158 @@ def listar_todos_codigos_base(
         )
         for cb in rows
     ]
+
+
+def _require_super_admin_user(db: Session, uid: int) -> AppUser:
+    user = db.get(AppUser, uid)
+    if not user or user.is_active is False:
+        raise HTTPException(403, "Solo super admin")
+    if not _matches_phone_digits(user.telefono, _SUPER_ADMIN_PHONE_DIGITS):
+        raise HTTPException(403, "Solo super admin")
+    return user
+
+
+def _catalog_item_out(cb: CodigoBase) -> CodigoBaseAdminCatalogItemOut:
+    return CodigoBaseAdminCatalogItemOut(
+        id=cb.id,
+        codigo=cb.codigo,
+        nombre=cb.nombre,
+        descripcion=cb.descripcion or None,
+        creado_por=cb.creado_por,
+        admin_id=cb.admin_id,
+        allow_any=cb.allow_any,
+        is_active=cb.is_active,
+        created_at=cb.created_at,
+    )
+
+
+@router.get("/admin/catalog", response_model=List[CodigoBaseAdminCatalogItemOut])
+def admin_catalog_codigos_base(
+    q: Optional[str] = None,
+    include_inactive: bool = True,
+    limit: int = 300,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    _require_super_admin_user(db, uid)
+
+    q = (q or "").strip()
+    stmt = select(CodigoBase)
+    if not include_inactive:
+        stmt = stmt.where(CodigoBase.is_active == True)  # noqa: E712
+    if q:
+        like = f"%{q}%"
+        stmt = stmt.where(
+            (CodigoBase.codigo.ilike(like)) | (CodigoBase.nombre.ilike(like))
+        )
+
+    rows = db.execute(
+        stmt.order_by(CodigoBase.is_active.desc(), CodigoBase.codigo.asc()).limit(limit)
+    ).scalars().all()
+
+    return [_catalog_item_out(cb) for cb in rows]
+
+
+@router.post("/admin/catalog", response_model=CodigoBaseAdminCatalogItemOut)
+def admin_create_codigo_base(
+    payload: CodigoBaseAdminCreateIn,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    _require_super_admin_user(db, uid)
+
+    codigo = payload.codigo.strip()
+    nombre = payload.nombre.strip()
+    if not codigo:
+        raise HTTPException(400, "Código base vacío")
+    if not nombre:
+        raise HTTPException(400, "Nombre vacío")
+
+    existing = db.execute(
+        select(CodigoBase).where(CodigoBase.codigo == codigo)
+    ).scalars().first()
+    if existing is not None:
+        raise HTTPException(409, "Ya existe un código base con ese código")
+
+    admin_id = payload.admin_id if payload.admin_id is not None else uid
+    admin_user = db.get(AppUser, admin_id)
+    if not admin_user:
+        raise HTTPException(404, "Admin ID no encontrado")
+
+    cb = CodigoBase(
+        codigo=codigo,
+        nombre=nombre,
+        descripcion=(payload.descripcion or "").strip(),
+        creado_por=uid,
+        admin_id=admin_id,
+        allow_any=payload.allow_any,
+        is_active=payload.is_active,
+        extra_schema=[],
+    )
+    db.add(cb)
+    db.commit()
+    db.refresh(cb)
+    return _catalog_item_out(cb)
+
+
+@router.patch("/admin/catalog/{codigo_base_id}", response_model=CodigoBaseAdminCatalogItemOut)
+def admin_update_codigo_base(
+    codigo_base_id: int,
+    payload: CodigoBaseAdminUpdateIn,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    _require_super_admin_user(db, uid)
+
+    cb = db.get(CodigoBase, codigo_base_id)
+    if cb is None:
+        raise HTTPException(404, "Código base no encontrado")
+
+    fields = _fields_set(payload)
+
+    if "nombre" in fields:
+        nombre = (payload.nombre or "").strip()
+        if not nombre:
+            raise HTTPException(400, "Nombre vacío")
+        cb.nombre = nombre
+
+    if "descripcion" in fields:
+        cb.descripcion = (payload.descripcion or "").strip()
+
+    if "admin_id" in fields:
+        if payload.admin_id is None:
+            raise HTTPException(400, "admin_id no puede ser null")
+        admin_user = db.get(AppUser, payload.admin_id)
+        if not admin_user:
+            raise HTTPException(404, "Admin ID no encontrado")
+        cb.admin_id = payload.admin_id
+
+    if "allow_any" in fields and payload.allow_any is not None:
+        cb.allow_any = payload.allow_any
+
+    if "is_active" in fields and payload.is_active is not None:
+        cb.is_active = payload.is_active
+
+    db.commit()
+    db.refresh(cb)
+    return _catalog_item_out(cb)
+
+
+@router.delete("/admin/catalog/{codigo_base_id}")
+def admin_delete_codigo_base(
+    codigo_base_id: int,
+    db: Session = Depends(get_db),
+    uid: int = Depends(_current_user_id),
+):
+    _require_super_admin_user(db, uid)
+
+    cb = db.get(CodigoBase, codigo_base_id)
+    if cb is None:
+        raise HTTPException(404, "Código base no encontrado")
+
+    cb.is_active = False
+    db.commit()
+    return {"ok": True}
 
 
 # ================= ADMIN: miembros y solicitudes =================
