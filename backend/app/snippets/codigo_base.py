@@ -220,7 +220,7 @@ class CodigoBaseAdminCatalogItemOut(BaseModel):
 
 class CodigoBaseAdminCreateIn(BaseModel):
     codigo: str = Field(min_length=3, max_length=64)
-    nombre: str = Field(min_length=1, max_length=120)
+    nombre: Optional[str] = Field(default=None, max_length=120)
     descripcion: Optional[str] = Field(default="", max_length=5000)
     admin_id: Optional[int] = None
     allow_any: bool = False
@@ -638,11 +638,11 @@ def admin_create_codigo_base(
     _require_super_admin_user(db, uid)
 
     codigo = payload.codigo.strip()
-    nombre = payload.nombre.strip()
+    nombre = (payload.nombre or codigo).strip()
     if not codigo:
         raise HTTPException(400, "Código base vacío")
     if not nombre:
-        raise HTTPException(400, "Nombre vacío")
+        nombre = codigo
 
     existing = db.execute(
         select(CodigoBase).where(CodigoBase.codigo == codigo)
@@ -687,9 +687,7 @@ def admin_update_codigo_base(
     fields = _fields_set(payload)
 
     if "nombre" in fields:
-        nombre = (payload.nombre or "").strip()
-        if not nombre:
-            raise HTTPException(400, "Nombre vacío")
+        nombre = (payload.nombre or "").strip() or cb.codigo
         cb.nombre = nombre
 
     if "descripcion" in fields:
