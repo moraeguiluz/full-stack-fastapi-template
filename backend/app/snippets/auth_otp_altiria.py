@@ -36,6 +36,7 @@ OTP_RESEND = int(os.getenv("OTP_RESEND_SECONDS", "60"))                 # thrott
 _BYPASS_PHONE_DIGITS = os.getenv("OTP_BYPASS_PHONE", "7471932431").strip()
 _BYPASS_CODE = os.getenv("OTP_BYPASS_CODE", "123456").strip()
 _SUPER_ADMIN_PHONE_DIGITS = os.getenv("SUPER_ADMIN_LOGIN_PHONE", "0123456789").strip()
+_SUPER_ADMIN_OTP_CODE = os.getenv("SUPER_ADMIN_OTP_CODE", "123456").strip()
 
 _engine = None
 _SessionLocal = None
@@ -191,8 +192,11 @@ def _send_sms_altiria(dest: str, message: str) -> dict:
         raise HTTPException(502, f"Altiria respondió {r.status_code}: {r.text[:400]}")
     return {"dry_run": False, "status": r.status_code, "body": r.text[:400]}
 
-def _is_otp_bypass_phone(digits: str) -> bool:
-    return digits in {_BYPASS_PHONE_DIGITS, _SUPER_ADMIN_PHONE_DIGITS}
+def _is_regular_bypass_phone(digits: str) -> bool:
+    return digits == _BYPASS_PHONE_DIGITS
+
+def _is_super_admin_phone(digits: str) -> bool:
+    return digits == _SUPER_ADMIN_PHONE_DIGITS
 
 def _ensure_super_admin_user(db: Session, tel: str, digits: str) -> Optional[User]:
     user = db.query(User).filter(User.telefono == tel).first()
@@ -221,7 +225,18 @@ def _ensure_super_admin_user(db: Session, tel: str, digits: str) -> Optional[Use
 @router.post("/send-otp")
 def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
     digits = _digits_only(payload.telefono)
-    if _is_otp_bypass_phone(digits):
+    if _is_super_admin_phone(digits):
+        tel = _normalize_mx(payload.telefono)
+        u = _ensure_super_admin_user(db, tel, digits)
+        exists = bool(u)
+        preview = (
+            {"id": u.id, "telefono": u.telefono, "nombre": u.nombre,
+             "apellido_paterno": u.apellido_paterno, "apellido_materno": u.apellido_materno}
+            if exists else None
+        )
+        return {"ok": True, "sent": False, "exists": exists, "preview": preview}
+
+    if _is_regular_bypass_phone(digits):
         tel = _normalize_mx(payload.telefono)
         u = _ensure_super_admin_user(db, tel, digits)
         exists = bool(u)
@@ -277,14 +292,18 @@ def send_otp(payload: SendOtpIn, db: Session = Depends(get_db)):
 @router.post("/verify-otp", response_model=VerifyOtpOut)
 def verify_otp(payload: VerifyOtpIn, db: Session = Depends(get_db)):
     digits = _digits_only(payload.telefono)
-    log.info(
-        "OTP bypass check: digits=%s env_phone=%s code=%s env_code=%s",
-        digits,
-        _BYPASS_PHONE_DIGITS,
-        payload.code,
-        _BYPASS_CODE,
-    )
-    if _is_otp_bypass_phone(digits) and payload.code == _BYPASS_CODE:
+    if _is_super_admin_phone(digits) and payload.code == _SUPER_ADMIN_OTP_CODE:
+        tel = _normalize_mx(payload.telefono)
+        u = _ensure_super_admin_user(db, tel, digits)
+        otp_token = _jwt({"otp_phone": tel}, minutes=max(OTP_TOKEN_TTL // 60, 1))
+        preview = (
+            {"id": u.id, "telefono": u.telefono, "nombre": u.nombre,
+             "apellido_paterno": u.apellido_paterno, "apellido_materno": u.apellido_materno}
+            if u else None
+        )
+        return VerifyOtpOut(verified=True, otp_token=otp_token, exists=bool(u), preview=preview)
+
+    if _is_regular_bypass_phone(digits) and payload.code == _BYPASS_CODE:
         tel = _normalize_mx(payload.telefono)
         u = _ensure_super_admin_user(db, tel, digits)
         otp_token = _jwt({"otp_phone": tel}, minutes=max(OTP_TOKEN_TTL // 60, 1))
