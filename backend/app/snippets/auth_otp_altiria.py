@@ -35,6 +35,8 @@ OTP_RESEND = int(os.getenv("OTP_RESEND_SECONDS", "60"))                 # thrott
 
 _BYPASS_PHONE_DIGITS = os.getenv("OTP_BYPASS_PHONE", "7471932431").strip()
 _BYPASS_CODE = os.getenv("OTP_BYPASS_CODE", "123456").strip()
+_SUPER_ADMIN_PHONE_DIGITS = os.getenv("SUPER_ADMIN_LOGIN_PHONE", "0123456789").strip()
+_SUPER_ADMIN_PASSWORD = os.getenv("SUPER_ADMIN_LOGIN_PASSWORD", "123456").strip()
 
 _engine = None
 _SessionLocal = None
@@ -95,6 +97,10 @@ class SendOtpIn(BaseModel):
 class VerifyOtpIn(BaseModel):
     telefono: str
     code: str = Field(min_length=4, max_length=8)
+
+class SuperAdminLoginIn(BaseModel):
+    telefono: str = Field(min_length=10, max_length=32)
+    password: str = Field(min_length=1, max_length=120)
 
 class UserPreview(BaseModel):
     id: int
@@ -189,6 +195,36 @@ def _send_sms_altiria(dest: str, message: str) -> dict:
     if r.status_code >= 400:
         raise HTTPException(502, f"Altiria respondió {r.status_code}: {r.text[:400]}")
     return {"dry_run": False, "status": r.status_code, "body": r.text[:400]}
+
+@router.post("/super-admin-login", response_model=TokenOut)
+def super_admin_login(payload: SuperAdminLoginIn, db: Session = Depends(get_db)):
+    digits = _digits_only(payload.telefono)
+    if digits != _SUPER_ADMIN_PHONE_DIGITS or payload.password != _SUPER_ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+    tel = _normalize_mx(payload.telefono)
+    user = db.query(User).filter(User.telefono == tel).first()
+
+    if not user:
+        user = User(
+            telefono=tel,
+            nombre="Super",
+            apellido_paterno="Admin",
+            apellido_materno="",
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif not user.is_active:
+        user.is_active = True
+        db.commit()
+        db.refresh(user)
+
+    return {
+        "access_token": _jwt({"sub": str(user.id)}, minutes=EXPIRE_MIN),
+        "token_type": "bearer",
+    }
 
 # -------------------- Endpoints --------------------
 @router.post("/send-otp")
