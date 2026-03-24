@@ -192,15 +192,19 @@ def _send_sms_altiria(dest: str, message: str) -> dict:
         raise HTTPException(502, f"Altiria respondió {r.status_code}: {r.text[:400]}")
     return {"dry_run": False, "status": r.status_code, "body": r.text[:400]}
 
+def _matches_phone_digits(phone_digits: str, configured_digits: str) -> bool:
+    clean = _digits_only(configured_digits)
+    return phone_digits == clean or phone_digits.endswith(clean)
+
 def _is_regular_bypass_phone(digits: str) -> bool:
-    return digits == _BYPASS_PHONE_DIGITS
+    return _matches_phone_digits(digits, _BYPASS_PHONE_DIGITS)
 
 def _is_super_admin_phone(digits: str) -> bool:
-    return digits == _SUPER_ADMIN_PHONE_DIGITS
+    return _matches_phone_digits(digits, _SUPER_ADMIN_PHONE_DIGITS)
 
 def _ensure_super_admin_user(db: Session, tel: str, digits: str) -> Optional[User]:
     user = db.query(User).filter(User.telefono == tel).first()
-    if digits != _SUPER_ADMIN_PHONE_DIGITS:
+    if not _is_super_admin_phone(digits):
         return user
 
     if not user:
