@@ -56,6 +56,7 @@ from .schemas import (
     ExitNodeHeartbeatOut,
     ExitNodeDesiredIn,
     ExitNodeDesiredOut,
+    ExitNodeDeleteOut,
     ExitNodeListItem,
     ExitNodeListOut,
     ExitNodeConnectOut,
@@ -1067,6 +1068,21 @@ def set_exit_node_desired(
         node_id=normalized,
         desired_json=node.desired_json or {},
     )
+
+
+@router.delete("/exit-nodes/{node_id}", response_model=ExitNodeDeleteOut)
+def delete_exit_node(
+    node_id: str,
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ExitNodeDeleteOut:
+    normalized = _normalize_exit_node_label(node_id)
+    node = _find_exit_node_by_name(db, normalized)
+    if node is None:
+        raise HTTPException(404, "Exit node no encontrado")
+    db.delete(node)
+    db.commit()
+    return ExitNodeDeleteOut(node_id=normalized)
 
 
 @router.get("/exit-nodes/{node_id}/connect", response_model=ExitNodeConnectOut)

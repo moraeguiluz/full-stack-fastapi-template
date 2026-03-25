@@ -195,6 +195,11 @@ class ExitNodeConnectOut(BaseModel):
     relay: Optional[Any] = None
 
 
+class ExitNodeDeleteOut(BaseModel):
+    ok: bool = True
+    node_id: str
+
+
 class ProvisionIn(BaseModel):
     name: str = Field(..., min_length=3, max_length=63)
     profile_id: Optional[int] = None
