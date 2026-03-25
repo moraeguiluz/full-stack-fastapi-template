@@ -51,6 +51,8 @@ from .schemas import (
     ExitNodeRegisterOut,
     ExitNodeHeartbeatIn,
     ExitNodeHeartbeatOut,
+    ExitNodeDesiredIn,
+    ExitNodeDesiredOut,
     ExitNodeListItem,
     ExitNodeListOut,
     ProvisionIn,
@@ -93,6 +95,11 @@ _EXIT_NODE_SANITIZE_RE = re.compile(r"[^a-z0-9-]+")
 _EXIT_NODE_REGISTER_PASSWORD = "admin"
 _EXIT_NODE_ONLINE_WINDOW_SECONDS = 90
 _EXIT_NODE_HEARTBEAT_INTERVAL_SECONDS = 30
+_EXIT_NODE_WG_SUBNET_PREFIX = "10.44"
+_EXIT_NODE_WG_DEFAULT_ALLOWED_IPS = ["0.0.0.0/0", "::/0"]
+_EXIT_NODE_WG_DEFAULT_DNS = ["1.1.1.1", "1.0.0.1"]
+_EXIT_NODE_WG_DEFAULT_MTU = 1280
+_EXIT_NODE_WG_DEFAULT_KEEPALIVE = 25
 
 
 def _ensure_name(name: str) -> None:
@@ -147,11 +154,17 @@ def _exit_node_list_item(node: NaveExit) -> ExitNodeListItem:
     status_json = node.status_json if isinstance(node.status_json, dict) else {}
     instance_json = node.instance_json if isinstance(node.instance_json, dict) else {}
     desired_json = node.desired_json if isinstance(node.desired_json, dict) else {}
-    wireguard = (
-        status_json.get("wireguard")
-        or desired_json.get("wireguard")
-        or instance_json.get("wireguard")
-    )
+    desired_wireguard = desired_json.get("wireguard") if isinstance(desired_json.get("wireguard"), dict) else {}
+    instance_wireguard = instance_json.get("wireguard") if isinstance(instance_json.get("wireguard"), dict) else {}
+    status_wireguard = status_json.get("wireguard") if isinstance(status_json.get("wireguard"), dict) else {}
+    if desired_wireguard or instance_wireguard or status_wireguard:
+        wireguard = {
+            **instance_wireguard,
+            **desired_wireguard,
+            **status_wireguard,
+        }
+    else:
+        wireguard = None
     proxy_rule = ""
     for source in (status_json, desired_json, instance_json):
         value = source.get("proxy_rule") if isinstance(source, dict) else None
@@ -167,6 +180,53 @@ def _exit_node_list_item(node: NaveExit) -> ExitNodeListItem:
         wireguard=wireguard,
         proxy_rule=proxy_rule,
     )
+
+
+def _exit_node_subnet_octet(node: NaveExit) -> int:
+    try:
+        raw_id = int(node.id or 1)
+    except Exception:
+        raw_id = 1
+    return ((raw_id - 1) % 250) + 1
+
+
+def _build_exit_node_wireguard(node: NaveExit, public_ip: Optional[str], wireguard_payload: dict[str, Any]) -> dict[str, Any]:
+    interface_name = str(wireguard_payload.get("interface") or "naveexit").strip() or "naveexit"
+    listen_port_raw = wireguard_payload.get("listen_port")
+    listen_port = int(listen_port_raw) if isinstance(listen_port_raw, int) or str(listen_port_raw).isdigit() else 51820
+    node_public_key = str(wireguard_payload.get("public_key") or "").strip()
+    egress_iface = str(wireguard_payload.get("default_egress_iface") or "").strip()
+    subnet_octet = _exit_node_subnet_octet(node)
+    server_address = f"{_EXIT_NODE_WG_SUBNET_PREFIX}.{subnet_octet}.1/24"
+    client_address = f"{_EXIT_NODE_WG_SUBNET_PREFIX}.{subnet_octet}.2/32"
+    endpoint = f"{public_ip}:{listen_port}" if public_ip else ""
+
+    lines = [
+        "[Interface]",
+        "PrivateKey = __PRIVATE_KEY__",
+        f"Address = {server_address}",
+        f"ListenPort = {listen_port}",
+    ]
+    if egress_iface:
+        lines.append(f"PostUp = /opt/nave-exit-node/wg-nat.sh up %i {egress_iface}")
+        lines.append(f"PostDown = /opt/nave-exit-node/wg-nat.sh down %i {egress_iface}")
+    wg_conf = "\n".join(lines) + "\n"
+
+    return {
+        "role": "server",
+        "interface": interface_name,
+        "addresses": [server_address],
+        "listen_port": listen_port,
+        "public_key": node_public_key,
+        "endpoint": endpoint,
+        "egress_iface": egress_iface,
+        "client_address": client_address,
+        "allowed_ips": list(_EXIT_NODE_WG_DEFAULT_ALLOWED_IPS),
+        "dns": list(_EXIT_NODE_WG_DEFAULT_DNS),
+        "mtu": _EXIT_NODE_WG_DEFAULT_MTU,
+        "persistent_keepalive": _EXIT_NODE_WG_DEFAULT_KEEPALIVE,
+        "wg_conf": wg_conf,
+    }
 
 
 def _auth(_token: str = Depends(oauth2)) -> None:
@@ -674,9 +734,14 @@ def register_exit_node(
     db.commit()
     db.refresh(node)
 
-    desired_wireguard = None
-    if isinstance(node.desired_json, dict):
-        desired_wireguard = node.desired_json.get("wireguard")
+    desired_wireguard = _build_exit_node_wireguard(node, public_ip, wireguard_payload)
+    node.desired_json = {
+        "wg_conf": desired_wireguard.get("wg_conf") or "",
+        "wireguard": desired_wireguard,
+    }
+    db.add(node)
+    db.commit()
+    db.refresh(node)
 
     return ExitNodeRegisterOut(
         node_id=normalized,
@@ -704,8 +769,25 @@ def heartbeat_exit_node(
     metadata_payload = inp.metadata if isinstance(inp.metadata, dict) else {}
     wireguard_payload = inp.wireguard if isinstance(inp.wireguard, dict) else {}
     current_status = node.status_json if isinstance(node.status_json, dict) else {}
+    desired_json = node.desired_json if isinstance(node.desired_json, dict) else {}
 
     node.public_ip = _extract_public_ip(metadata_payload) or node.public_ip
+    desired_wireguard = desired_json.get("wireguard") if isinstance(desired_json.get("wireguard"), dict) else {}
+    if node.public_ip and desired_wireguard:
+        listen_port = desired_wireguard.get("listen_port")
+        if not isinstance(listen_port, int):
+            try:
+                listen_port = int(listen_port or 51820)
+            except Exception:
+                listen_port = 51820
+        desired_wireguard = {
+            **desired_wireguard,
+            "endpoint": f"{node.public_ip}:{listen_port}",
+        }
+        node.desired_json = {
+            **desired_json,
+            "wireguard": desired_wireguard,
+        }
     node.last_seen_at = now_utc()
     node.status_json = {
         **current_status,
@@ -720,6 +802,59 @@ def heartbeat_exit_node(
     return ExitNodeHeartbeatOut(
         ok=True,
         heartbeat_interval_seconds=_EXIT_NODE_HEARTBEAT_INTERVAL_SECONDS,
+    )
+
+
+@router.get("/exit-nodes/{node_id}/desired", response_model=ExitNodeDesiredOut)
+def get_exit_node_desired(
+    node_id: str,
+    db: Session = Depends(get_db),
+    node_secret: Optional[str] = Header(default=None, alias="X-Nave-Node-Secret"),
+) -> ExitNodeDesiredOut:
+    normalized = _normalize_exit_node_label(node_id)
+    node = _find_exit_node_by_name(db, normalized)
+    if node is None:
+        raise HTTPException(404, "Exit node no encontrado")
+    if not node_secret or node_secret != node.agent_token:
+        raise HTTPException(401, "node_secret invalido")
+    node.last_seen_at = now_utc()
+    db.add(node)
+    db.commit()
+    return ExitNodeDesiredOut(
+        node_id=normalized,
+        desired_json=node.desired_json or {},
+    )
+
+
+@router.post("/exit-nodes/{node_id}/desired", response_model=ExitNodeDesiredOut)
+def set_exit_node_desired(
+    node_id: str,
+    inp: ExitNodeDesiredIn,
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ExitNodeDesiredOut:
+    normalized = _normalize_exit_node_label(node_id)
+    node = _find_exit_node_by_name(db, normalized)
+    if node is None:
+        raise HTTPException(404, "Exit node no encontrado")
+
+    desired_payload = inp.desired_json if isinstance(inp.desired_json, dict) else {}
+    if inp.wg_conf:
+        desired_payload = {
+            **desired_payload,
+            "wg_conf": inp.wg_conf,
+        }
+    if isinstance(inp.wireguard, dict):
+        desired_payload = {
+            **desired_payload,
+            "wireguard": inp.wireguard,
+        }
+    node.desired_json = desired_payload
+    db.add(node)
+    db.commit()
+    return ExitNodeDesiredOut(
+        node_id=normalized,
+        desired_json=node.desired_json or {},
     )
 
 

@@ -150,6 +150,17 @@ class ExitNodeHeartbeatOut(BaseModel):
     heartbeat_interval_seconds: int = 30
 
 
+class ExitNodeDesiredIn(BaseModel):
+    desired_json: Optional[Any] = None
+    wg_conf: Optional[str] = Field(default=None, min_length=10)
+    wireguard: Optional[Any] = None
+
+
+class ExitNodeDesiredOut(BaseModel):
+    node_id: str
+    desired_json: Any
+
+
 class ExitNodeListItem(BaseModel):
     id: str
     label: str
