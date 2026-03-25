@@ -128,6 +128,7 @@ class ExitNodeRegisterIn(BaseModel):
     metadata: Optional[Any] = None
     capabilities: Optional[Any] = None
     wireguard: Optional[Any] = None
+    proxy: Optional[Any] = None
 
 
 class ExitNodeRegisterOut(BaseModel):
@@ -136,6 +137,7 @@ class ExitNodeRegisterOut(BaseModel):
     label: str
     heartbeat_interval_seconds: int = 30
     wireguard: Optional[Any] = None
+    proxy: Optional[Any] = None
 
 
 class ExitNodeHeartbeatIn(BaseModel):
@@ -143,6 +145,7 @@ class ExitNodeHeartbeatIn(BaseModel):
     observed_at: Optional[dt.datetime] = None
     metadata: Optional[Any] = None
     wireguard: Optional[Any] = None
+    proxy: Optional[Any] = None
 
 
 class ExitNodeHeartbeatOut(BaseModel):
@@ -154,6 +157,7 @@ class ExitNodeDesiredIn(BaseModel):
     desired_json: Optional[Any] = None
     wg_conf: Optional[str] = Field(default=None, min_length=10)
     wireguard: Optional[Any] = None
+    proxy: Optional[Any] = None
 
 
 class ExitNodeDesiredOut(BaseModel):
@@ -169,6 +173,8 @@ class ExitNodeListItem(BaseModel):
     last_seen_at: Optional[dt.datetime] = None
     wireguard: Optional[Any] = None
     proxy_rule: str = ""
+    proxy: Optional[Any] = None
+    proxy_auth: Optional[Any] = None
 
 
 class ExitNodeListOut(BaseModel):

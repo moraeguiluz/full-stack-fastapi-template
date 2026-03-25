@@ -150,6 +150,82 @@ def _exit_node_online(last_seen_at) -> bool:
     return delta.total_seconds() <= _EXIT_NODE_ONLINE_WINDOW_SECONDS
 
 
+def _normalize_proxy_payload(value: Any, fallback_host: Optional[str] = None) -> dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    proxy = payload.get("proxy") if isinstance(payload.get("proxy"), dict) else payload
+    if not isinstance(proxy, dict):
+        return {}
+    host = str(proxy.get("host") or proxy.get("hostname") or fallback_host or "").strip()
+    port_raw = proxy.get("port") or proxy.get("proxy_port") or 0
+    try:
+        port = int(port_raw)
+    except Exception:
+        port = 0
+    scheme = str(proxy.get("type") or proxy.get("scheme") or "http").strip().lower() or "http"
+    username = str(proxy.get("username") or proxy.get("user") or "").strip()
+    password = str(proxy.get("password") or proxy.get("pass") or "").strip()
+    auth = {"username": username, "password": password} if username else None
+    proxy_rule = str(payload.get("proxy_rule") or proxy.get("proxy_rule") or "").strip()
+    if not proxy_rule and host and port:
+        scheme_for_rule = "socks5" if scheme.startswith("socks") else "http"
+        proxy_rule = f"{scheme_for_rule}://{host}:{port}"
+    if not host and not port and not proxy_rule:
+        return {}
+    return {
+        "type": scheme,
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "auth": auth,
+        "proxy_rule": proxy_rule,
+    }
+
+
+def _build_exit_node_proxy(node: NaveExit, public_ip: Optional[str], proxy_payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_proxy_payload(proxy_payload, public_ip)
+    if not normalized:
+        return {}
+    host = str(normalized.get("host") or public_ip or "").strip()
+    port = normalized.get("port") if isinstance(normalized.get("port"), int) else 0
+    if port <= 0:
+        port = 8888
+    username = str(normalized.get("username") or node.address_name or node.vm_name or f"exit-{node.id}").strip()
+    password = str(normalized.get("password") or node.agent_token or "").strip()
+    scheme = str(normalized.get("type") or "http").strip().lower() or "http"
+    scheme_for_rule = "socks5" if scheme.startswith("socks") else "http"
+    proxy_rule = f"{scheme_for_rule}://{host}:{port}" if host and port else ""
+    return {
+        "type": scheme,
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "auth": {"username": username, "password": password} if username else None,
+        "proxy_rule": proxy_rule,
+    }
+
+
+def _extract_exit_node_proxy(node: NaveExit) -> tuple[str, Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    status_json = node.status_json if isinstance(node.status_json, dict) else {}
+    instance_json = node.instance_json if isinstance(node.instance_json, dict) else {}
+    desired_json = node.desired_json if isinstance(node.desired_json, dict) else {}
+    for source in (status_json, desired_json, instance_json):
+        normalized = _normalize_proxy_payload(source, node.public_ip)
+        if normalized:
+            auth = normalized.get("auth") if isinstance(normalized.get("auth"), dict) else None
+            proxy = {
+                "type": normalized.get("type") or "http",
+                "host": normalized.get("host") or "",
+                "port": normalized.get("port") or 0,
+            }
+            if auth:
+                proxy["username"] = auth.get("username") or ""
+                proxy["password"] = auth.get("password") or ""
+            return str(normalized.get("proxy_rule") or ""), proxy, auth
+    return "", None, None
+
+
 def _exit_node_list_item(node: NaveExit) -> ExitNodeListItem:
     status_json = node.status_json if isinstance(node.status_json, dict) else {}
     instance_json = node.instance_json if isinstance(node.instance_json, dict) else {}
@@ -165,12 +241,7 @@ def _exit_node_list_item(node: NaveExit) -> ExitNodeListItem:
         }
     else:
         wireguard = None
-    proxy_rule = ""
-    for source in (status_json, desired_json, instance_json):
-        value = source.get("proxy_rule") if isinstance(source, dict) else None
-        if value:
-            proxy_rule = str(value).strip()
-            break
+    proxy_rule, proxy, proxy_auth = _extract_exit_node_proxy(node)
     return ExitNodeListItem(
         id=str(node.address_name or node.vm_name or node.id),
         label=str(node.vm_name or node.address_name or f"exit-{node.id}"),
@@ -179,6 +250,8 @@ def _exit_node_list_item(node: NaveExit) -> ExitNodeListItem:
         last_seen_at=node.last_seen_at,
         wireguard=wireguard,
         proxy_rule=proxy_rule,
+        proxy=proxy,
+        proxy_auth=proxy_auth,
     )
 
 
@@ -707,6 +780,7 @@ def register_exit_node(
     metadata_payload = inp.metadata if isinstance(inp.metadata, dict) else {}
     capabilities_payload = inp.capabilities if isinstance(inp.capabilities, dict) else {}
     wireguard_payload = inp.wireguard if isinstance(inp.wireguard, dict) else {}
+    proxy_payload = inp.proxy if isinstance(inp.proxy, dict) else {}
     public_ip = _extract_public_ip(metadata_payload)
 
     node = NaveExit(
@@ -720,12 +794,14 @@ def register_exit_node(
             "metadata": metadata_payload,
             "capabilities": capabilities_payload,
             "wireguard": wireguard_payload,
+            "proxy": proxy_payload,
             "registered_at": now_utc().isoformat(),
         },
         status_json={
             "status": "registered",
             "metadata": metadata_payload,
             "wireguard": wireguard_payload,
+            "proxy": proxy_payload,
             "observed_at": now_utc().isoformat(),
         },
         last_seen_at=now_utc(),
@@ -735,9 +811,12 @@ def register_exit_node(
     db.refresh(node)
 
     desired_wireguard = _build_exit_node_wireguard(node, public_ip, wireguard_payload)
+    desired_proxy = _build_exit_node_proxy(node, public_ip, proxy_payload)
     node.desired_json = {
         "wg_conf": desired_wireguard.get("wg_conf") or "",
         "wireguard": desired_wireguard,
+        "proxy": desired_proxy,
+        "proxy_rule": desired_proxy.get("proxy_rule") or "",
     }
     db.add(node)
     db.commit()
@@ -749,6 +828,7 @@ def register_exit_node(
         label=node.vm_name or normalized,
         heartbeat_interval_seconds=_EXIT_NODE_HEARTBEAT_INTERVAL_SECONDS,
         wireguard=desired_wireguard,
+        proxy=desired_proxy,
     )
 
 
@@ -768,11 +848,13 @@ def heartbeat_exit_node(
 
     metadata_payload = inp.metadata if isinstance(inp.metadata, dict) else {}
     wireguard_payload = inp.wireguard if isinstance(inp.wireguard, dict) else {}
+    proxy_payload = inp.proxy if isinstance(inp.proxy, dict) else {}
     current_status = node.status_json if isinstance(node.status_json, dict) else {}
     desired_json = node.desired_json if isinstance(node.desired_json, dict) else {}
 
     node.public_ip = _extract_public_ip(metadata_payload) or node.public_ip
     desired_wireguard = desired_json.get("wireguard") if isinstance(desired_json.get("wireguard"), dict) else {}
+    next_desired_payload = dict(desired_json)
     if node.public_ip and desired_wireguard:
         listen_port = desired_wireguard.get("listen_port")
         if not isinstance(listen_port, int):
@@ -784,10 +866,11 @@ def heartbeat_exit_node(
             **desired_wireguard,
             "endpoint": f"{node.public_ip}:{listen_port}",
         }
-        node.desired_json = {
-            **desired_json,
-            "wireguard": desired_wireguard,
-        }
+        next_desired_payload["wireguard"] = desired_wireguard
+    desired_proxy = _build_exit_node_proxy(node, node.public_ip, proxy_payload)
+    next_desired_payload["proxy"] = desired_proxy
+    next_desired_payload["proxy_rule"] = desired_proxy.get("proxy_rule") or ""
+    node.desired_json = next_desired_payload
     node.last_seen_at = now_utc()
     node.status_json = {
         **current_status,
@@ -795,6 +878,8 @@ def heartbeat_exit_node(
         "label": node.vm_name,
         "metadata": metadata_payload,
         "wireguard": wireguard_payload,
+        "proxy": desired_proxy,
+        "proxy_rule": desired_proxy.get("proxy_rule") or "",
         "observed_at": (inp.observed_at or now_utc()).isoformat(),
     }
     db.add(node)
@@ -848,6 +933,13 @@ def set_exit_node_desired(
         desired_payload = {
             **desired_payload,
             "wireguard": inp.wireguard,
+        }
+    if isinstance(inp.proxy, dict):
+        normalized_proxy = _build_exit_node_proxy(node, node.public_ip, inp.proxy)
+        desired_payload = {
+            **desired_payload,
+            "proxy": normalized_proxy,
+            "proxy_rule": normalized_proxy.get("proxy_rule") or "",
         }
     node.desired_json = desired_payload
     db.add(node)
