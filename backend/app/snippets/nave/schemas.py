@@ -111,6 +111,59 @@ class AgentStatusGetOut(BaseModel):
     status_json: Any
 
 
+class ExitNodeCheckNameIn(BaseModel):
+    label: str = Field(..., min_length=2, max_length=120)
+    register_password: str = Field(..., min_length=1, max_length=120)
+
+
+class ExitNodeCheckNameOut(BaseModel):
+    available: bool
+    normalized_label: str
+    reason: str = ""
+
+
+class ExitNodeRegisterIn(BaseModel):
+    label: str = Field(..., min_length=2, max_length=120)
+    register_password: str = Field(..., min_length=1, max_length=120)
+    metadata: Optional[Any] = None
+    capabilities: Optional[Any] = None
+    wireguard: Optional[Any] = None
+
+
+class ExitNodeRegisterOut(BaseModel):
+    node_id: str
+    node_secret: str
+    label: str
+    heartbeat_interval_seconds: int = 30
+    wireguard: Optional[Any] = None
+
+
+class ExitNodeHeartbeatIn(BaseModel):
+    status: str = Field(default="online", min_length=2, max_length=32)
+    observed_at: Optional[dt.datetime] = None
+    metadata: Optional[Any] = None
+    wireguard: Optional[Any] = None
+
+
+class ExitNodeHeartbeatOut(BaseModel):
+    ok: bool = True
+    heartbeat_interval_seconds: int = 30
+
+
+class ExitNodeListItem(BaseModel):
+    id: str
+    label: str
+    public_ip: Optional[str] = None
+    online: bool
+    last_seen_at: Optional[dt.datetime] = None
+    wireguard: Optional[Any] = None
+    proxy_rule: str = ""
+
+
+class ExitNodeListOut(BaseModel):
+    data: List[ExitNodeListItem]
+
+
 class ProvisionIn(BaseModel):
     name: str = Field(..., min_length=3, max_length=63)
     profile_id: Optional[int] = None

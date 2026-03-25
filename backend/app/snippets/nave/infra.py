@@ -45,6 +45,14 @@ from .schemas import (
     AgentStatusIn,
     AgentStatusOut,
     AgentStatusGetOut,
+    ExitNodeCheckNameIn,
+    ExitNodeCheckNameOut,
+    ExitNodeRegisterIn,
+    ExitNodeRegisterOut,
+    ExitNodeHeartbeatIn,
+    ExitNodeHeartbeatOut,
+    ExitNodeListItem,
+    ExitNodeListOut,
     ProvisionIn,
     ProvisionOut,
     ProvisionStartOut,
@@ -81,11 +89,84 @@ class InstanceCreateIn(BaseModel):
 
 
 _NAME_RE = re.compile(r"^[a-z]([-a-z0-9]{1,61}[a-z0-9])$")
+_EXIT_NODE_SANITIZE_RE = re.compile(r"[^a-z0-9-]+")
+_EXIT_NODE_REGISTER_PASSWORD = "admin"
+_EXIT_NODE_ONLINE_WINDOW_SECONDS = 90
+_EXIT_NODE_HEARTBEAT_INTERVAL_SECONDS = 30
 
 
 def _ensure_name(name: str) -> None:
     if not _NAME_RE.match(name):
         raise HTTPException(400, "Nombre invalido (solo letras minusculas, numeros y '-')")
+
+
+def _normalize_exit_node_label(label: str) -> str:
+    value = (label or "").strip().lower()
+    value = _EXIT_NODE_SANITIZE_RE.sub("-", value)
+    value = re.sub(r"-{2,}", "-", value).strip("-")
+    if value and not value[0].isalpha():
+        value = f"n-{value}"
+    value = value[:63].rstrip("-")
+    return value
+
+
+def _ensure_exit_node_password(password: str) -> None:
+    if password != _EXIT_NODE_REGISTER_PASSWORD:
+        raise HTTPException(401, "Clave de registro invalida")
+
+
+def _find_exit_node_by_name(db: Session, node_id: str) -> Optional[NaveExit]:
+    stmt = select(NaveExit).where(NaveExit.address_name == node_id)
+    return db.execute(stmt).scalar_one_or_none()
+
+
+def _extract_public_ip(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("public_ip", "external_ip", "ip"):
+        value = payload.get(key)
+        if value:
+            return str(value).strip()
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("public_ip", "external_ip", "ip"):
+            value = metadata.get(key)
+            if value:
+                return str(value).strip()
+    return None
+
+
+def _exit_node_online(last_seen_at) -> bool:
+    if not last_seen_at:
+        return False
+    delta = now_utc() - last_seen_at
+    return delta.total_seconds() <= _EXIT_NODE_ONLINE_WINDOW_SECONDS
+
+
+def _exit_node_list_item(node: NaveExit) -> ExitNodeListItem:
+    status_json = node.status_json if isinstance(node.status_json, dict) else {}
+    instance_json = node.instance_json if isinstance(node.instance_json, dict) else {}
+    desired_json = node.desired_json if isinstance(node.desired_json, dict) else {}
+    wireguard = (
+        status_json.get("wireguard")
+        or desired_json.get("wireguard")
+        or instance_json.get("wireguard")
+    )
+    proxy_rule = ""
+    for source in (status_json, desired_json, instance_json):
+        value = source.get("proxy_rule") if isinstance(source, dict) else None
+        if value:
+            proxy_rule = str(value).strip()
+            break
+    return ExitNodeListItem(
+        id=str(node.address_name or node.vm_name or node.id),
+        label=str(node.vm_name or node.address_name or f"exit-{node.id}"),
+        public_ip=node.public_ip,
+        online=_exit_node_online(node.last_seen_at),
+        last_seen_at=node.last_seen_at,
+        wireguard=wireguard,
+        proxy_rule=proxy_rule,
+    )
 
 
 def _auth(_token: str = Depends(oauth2)) -> None:
@@ -517,6 +598,158 @@ def _agent_from_token(
 @router.get("/defaults")
 def get_defaults(_=Depends(_auth)):
     return defaults()
+
+
+@router.post("/exit-nodes/check-name", response_model=ExitNodeCheckNameOut)
+def check_exit_node_name(
+    inp: ExitNodeCheckNameIn,
+    db: Session = Depends(get_db),
+) -> ExitNodeCheckNameOut:
+    _ensure_exit_node_password(inp.register_password)
+    normalized = _normalize_exit_node_label(inp.label)
+    if len(normalized) < 2:
+        return ExitNodeCheckNameOut(
+            available=False,
+            normalized_label=normalized,
+            reason="Nombre invalido",
+        )
+    try:
+        _ensure_name(normalized)
+    except HTTPException:
+        return ExitNodeCheckNameOut(
+            available=False,
+            normalized_label=normalized,
+            reason="Nombre invalido",
+        )
+    existing = _find_exit_node_by_name(db, normalized)
+    if existing is not None:
+        return ExitNodeCheckNameOut(
+            available=False,
+            normalized_label=normalized,
+            reason="Nombre ocupado",
+        )
+    return ExitNodeCheckNameOut(available=True, normalized_label=normalized)
+
+
+@router.post("/exit-nodes/register", response_model=ExitNodeRegisterOut)
+def register_exit_node(
+    inp: ExitNodeRegisterIn,
+    db: Session = Depends(get_db),
+) -> ExitNodeRegisterOut:
+    _ensure_exit_node_password(inp.register_password)
+    normalized = _normalize_exit_node_label(inp.label)
+    if len(normalized) < 2:
+        raise HTTPException(400, "Nombre invalido")
+    _ensure_name(normalized)
+    if _find_exit_node_by_name(db, normalized) is not None:
+        raise HTTPException(409, "Nombre ocupado")
+
+    metadata_payload = inp.metadata if isinstance(inp.metadata, dict) else {}
+    capabilities_payload = inp.capabilities if isinstance(inp.capabilities, dict) else {}
+    wireguard_payload = inp.wireguard if isinstance(inp.wireguard, dict) else {}
+    public_ip = _extract_public_ip(metadata_payload)
+
+    node = NaveExit(
+        profile_id=None,
+        vm_name=normalized,
+        address_name=normalized,
+        public_ip=public_ip,
+        agent_token=secrets.token_urlsafe(32),
+        desired_json=None,
+        instance_json={
+            "metadata": metadata_payload,
+            "capabilities": capabilities_payload,
+            "wireguard": wireguard_payload,
+            "registered_at": now_utc().isoformat(),
+        },
+        status_json={
+            "status": "registered",
+            "metadata": metadata_payload,
+            "wireguard": wireguard_payload,
+            "observed_at": now_utc().isoformat(),
+        },
+        last_seen_at=now_utc(),
+    )
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+
+    desired_wireguard = None
+    if isinstance(node.desired_json, dict):
+        desired_wireguard = node.desired_json.get("wireguard")
+
+    return ExitNodeRegisterOut(
+        node_id=normalized,
+        node_secret=node.agent_token,
+        label=node.vm_name or normalized,
+        heartbeat_interval_seconds=_EXIT_NODE_HEARTBEAT_INTERVAL_SECONDS,
+        wireguard=desired_wireguard,
+    )
+
+
+@router.post("/exit-nodes/{node_id}/heartbeat", response_model=ExitNodeHeartbeatOut)
+def heartbeat_exit_node(
+    node_id: str,
+    inp: ExitNodeHeartbeatIn,
+    db: Session = Depends(get_db),
+    node_secret: Optional[str] = Header(default=None, alias="X-Nave-Node-Secret"),
+) -> ExitNodeHeartbeatOut:
+    normalized = _normalize_exit_node_label(node_id)
+    node = _find_exit_node_by_name(db, normalized)
+    if node is None:
+        raise HTTPException(404, "Exit node no encontrado")
+    if not node_secret or node_secret != node.agent_token:
+        raise HTTPException(401, "node_secret invalido")
+
+    metadata_payload = inp.metadata if isinstance(inp.metadata, dict) else {}
+    wireguard_payload = inp.wireguard if isinstance(inp.wireguard, dict) else {}
+    current_status = node.status_json if isinstance(node.status_json, dict) else {}
+
+    node.public_ip = _extract_public_ip(metadata_payload) or node.public_ip
+    node.last_seen_at = now_utc()
+    node.status_json = {
+        **current_status,
+        "status": inp.status,
+        "label": node.vm_name,
+        "metadata": metadata_payload,
+        "wireguard": wireguard_payload,
+        "observed_at": (inp.observed_at or now_utc()).isoformat(),
+    }
+    db.add(node)
+    db.commit()
+    return ExitNodeHeartbeatOut(
+        ok=True,
+        heartbeat_interval_seconds=_EXIT_NODE_HEARTBEAT_INTERVAL_SECONDS,
+    )
+
+
+@router.get("/exit-nodes", response_model=ExitNodeListOut)
+def list_exit_nodes(
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ExitNodeListOut:
+    stmt = select(NaveExit).order_by(
+        NaveExit.last_seen_at.desc().nullslast(),
+        NaveExit.id.desc(),
+    )
+    nodes = db.execute(stmt).scalars().all()
+    return ExitNodeListOut(data=[_exit_node_list_item(node) for node in nodes])
+
+
+@router.get("/exits", response_model=ExitNodeListOut)
+def list_exit_nodes_alias(
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ExitNodeListOut:
+    return list_exit_nodes(db)
+
+
+@router.get("/agents", response_model=ExitNodeListOut)
+def list_exit_nodes_agents_alias(
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ExitNodeListOut:
+    return list_exit_nodes(db)
 
 
 @router.get("/addresses/{name}")
