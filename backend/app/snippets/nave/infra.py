@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
 import re
 import secrets
 from typing import Optional, Any
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Header, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Header, BackgroundTasks, Query, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -55,6 +58,7 @@ from .schemas import (
     ExitNodeDesiredOut,
     ExitNodeListItem,
     ExitNodeListOut,
+    ExitNodeConnectOut,
     ProvisionIn,
     ProvisionOut,
     ProvisionStartOut,
@@ -100,6 +104,13 @@ _EXIT_NODE_WG_DEFAULT_ALLOWED_IPS = ["0.0.0.0/0", "::/0"]
 _EXIT_NODE_WG_DEFAULT_DNS = ["1.1.1.1", "1.0.0.1"]
 _EXIT_NODE_WG_DEFAULT_MTU = 1280
 _EXIT_NODE_WG_DEFAULT_KEEPALIVE = 25
+
+_RELAY_NODE_SOCKETS: dict[str, WebSocket] = {}
+_RELAY_NODE_SEND_LOCKS: dict[str, asyncio.Lock] = {}
+_RELAY_STREAM_CLIENTS: dict[str, WebSocket] = {}
+_RELAY_STREAM_NODE_IDS: dict[str, str] = {}
+_RELAY_OPEN_WAITERS: dict[str, asyncio.Future] = {}
+_RELAY_STATE_LOCK = asyncio.Lock()
 
 
 def _ensure_name(name: str) -> None:
@@ -226,6 +237,113 @@ def _extract_exit_node_proxy(node: NaveExit) -> tuple[str, Optional[dict[str, An
     return "", None, None
 
 
+def _relay_node_payload(node_id: str) -> dict[str, Any]:
+    return {
+        "mode": "ws_reverse_connect",
+        "node_id": node_id,
+        "connect_path": f"/nave/infra/relay/connect/{node_id}",
+        "node_path": f"/nave/infra/relay/node/{node_id}",
+    }
+
+
+def _relay_node_connected(node_id: str) -> bool:
+    return node_id in _RELAY_NODE_SOCKETS
+
+
+async def _relay_register_node_socket(node_id: str, websocket: WebSocket) -> None:
+    previous = None
+    async with _RELAY_STATE_LOCK:
+        previous = _RELAY_NODE_SOCKETS.get(node_id)
+        _RELAY_NODE_SOCKETS[node_id] = websocket
+        _RELAY_NODE_SEND_LOCKS[node_id] = asyncio.Lock()
+    if previous is not None and previous is not websocket:
+        try:
+            await previous.close(code=1012)
+        except Exception:
+            pass
+
+
+async def _relay_unregister_node_socket(node_id: str, websocket: WebSocket) -> None:
+    stale_clients: list[WebSocket] = []
+    async with _RELAY_STATE_LOCK:
+        current = _RELAY_NODE_SOCKETS.get(node_id)
+        if current is websocket:
+            _RELAY_NODE_SOCKETS.pop(node_id, None)
+            _RELAY_NODE_SEND_LOCKS.pop(node_id, None)
+        for stream_id, stream_node_id in list(_RELAY_STREAM_NODE_IDS.items()):
+            if stream_node_id != node_id:
+                continue
+            client = _RELAY_STREAM_CLIENTS.pop(stream_id, None)
+            _RELAY_STREAM_NODE_IDS.pop(stream_id, None)
+            waiter = _RELAY_OPEN_WAITERS.pop(stream_id, None)
+            if waiter is not None and not waiter.done():
+                waiter.set_result({"type": "open_error", "error": "relay node disconnected"})
+            if client is not None:
+                stale_clients.append(client)
+    for client in stale_clients:
+        try:
+            await client.close(code=1012)
+        except Exception:
+            pass
+
+
+async def _relay_register_stream(stream_id: str, node_id: str, websocket: WebSocket, waiter: asyncio.Future) -> None:
+    async with _RELAY_STATE_LOCK:
+        _RELAY_STREAM_CLIENTS[stream_id] = websocket
+        _RELAY_STREAM_NODE_IDS[stream_id] = node_id
+        _RELAY_OPEN_WAITERS[stream_id] = waiter
+
+
+async def _relay_pop_open_waiter(stream_id: str) -> Optional[asyncio.Future]:
+    async with _RELAY_STATE_LOCK:
+        waiter = _RELAY_OPEN_WAITERS.pop(stream_id, None)
+    return waiter
+
+
+async def _relay_get_client_socket(stream_id: str) -> Optional[WebSocket]:
+    async with _RELAY_STATE_LOCK:
+        client = _RELAY_STREAM_CLIENTS.get(stream_id)
+    return client
+
+
+async def _relay_cleanup_stream(stream_id: str) -> None:
+    async with _RELAY_STATE_LOCK:
+        _RELAY_STREAM_CLIENTS.pop(stream_id, None)
+        _RELAY_STREAM_NODE_IDS.pop(stream_id, None)
+        waiter = _RELAY_OPEN_WAITERS.pop(stream_id, None)
+        if waiter is not None and not waiter.done():
+            waiter.set_result({"type": "open_error", "error": "relay stream closed"})
+
+
+async def _relay_send_to_node(node_id: str, payload: dict[str, Any]) -> None:
+    async with _RELAY_STATE_LOCK:
+        websocket = _RELAY_NODE_SOCKETS.get(node_id)
+        send_lock = _RELAY_NODE_SEND_LOCKS.get(node_id)
+    if websocket is None or send_lock is None:
+        raise RuntimeError("relay node offline")
+    async with send_lock:
+        await websocket.send_text(json.dumps(payload, ensure_ascii=False))
+
+
+def _exit_node_connect_out(node: NaveExit) -> ExitNodeConnectOut:
+    item = _exit_node_list_item(node)
+    relay = _relay_node_payload(item.id) if _relay_node_connected(item.id) else None
+    transport = "relay" if relay else ("proxy" if item.proxy_rule else ("wireguard" if item.wireguard else "unknown"))
+    return ExitNodeConnectOut(
+        node_id=item.id,
+        label=item.label,
+        public_ip=item.public_ip,
+        online=item.online,
+        last_seen_at=item.last_seen_at,
+        transport=transport,
+        wireguard=item.wireguard,
+        proxy_rule=item.proxy_rule,
+        proxy=item.proxy,
+        proxy_auth=item.proxy_auth,
+        relay=relay,
+    )
+
+
 def _exit_node_list_item(node: NaveExit) -> ExitNodeListItem:
     status_json = node.status_json if isinstance(node.status_json, dict) else {}
     instance_json = node.instance_json if isinstance(node.instance_json, dict) else {}
@@ -242,11 +360,12 @@ def _exit_node_list_item(node: NaveExit) -> ExitNodeListItem:
     else:
         wireguard = None
     proxy_rule, proxy, proxy_auth = _extract_exit_node_proxy(node)
+    item_id = str(node.address_name or node.vm_name or node.id)
     return ExitNodeListItem(
-        id=str(node.address_name or node.vm_name or node.id),
+        id=item_id,
         label=str(node.vm_name or node.address_name or f"exit-{node.id}"),
         public_ip=node.public_ip,
-        online=_exit_node_online(node.last_seen_at),
+        online=_exit_node_online(node.last_seen_at) or _relay_node_connected(item_id),
         last_seen_at=node.last_seen_at,
         wireguard=wireguard,
         proxy_rule=proxy_rule,
@@ -948,6 +1067,158 @@ def set_exit_node_desired(
         node_id=normalized,
         desired_json=node.desired_json or {},
     )
+
+
+@router.get("/exit-nodes/{node_id}/connect", response_model=ExitNodeConnectOut)
+def connect_exit_node(
+    node_id: str,
+    db: Session = Depends(get_db),
+    _=Depends(_auth),
+) -> ExitNodeConnectOut:
+    normalized = _normalize_exit_node_label(node_id)
+    node = _find_exit_node_by_name(db, normalized)
+    if node is None:
+        raise HTTPException(404, "Exit node no encontrado")
+    payload = _exit_node_connect_out(node)
+    if not payload.online:
+        raise HTTPException(409, "Exit node offline")
+    if not payload.proxy_rule and not payload.wireguard and not payload.relay:
+        raise HTTPException(409, "Exit node sin transporte disponible")
+    return payload
+
+
+@router.websocket("/relay/node/{node_id}")
+async def relay_node_socket(
+    websocket: WebSocket,
+    node_id: str,
+    secret: str = Query(default=""),
+) -> None:
+    normalized = _normalize_exit_node_label(node_id)
+    db = new_session()
+    try:
+        node = _find_exit_node_by_name(db, normalized)
+    finally:
+        db.close()
+    if node is None or not secret or secret != node.agent_token:
+        await websocket.close(code=4401)
+        return
+
+    await websocket.accept()
+    await _relay_register_node_socket(normalized, websocket)
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            payload = json.loads(raw)
+            msg_type = str(payload.get("type") or "").strip().lower()
+            stream_id = str(payload.get("stream_id") or "").strip()
+            if msg_type in {"open_ok", "open_error"}:
+                waiter = await _relay_pop_open_waiter(stream_id)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(payload)
+                continue
+            if msg_type == "data":
+                if not stream_id:
+                    continue
+                data_b64 = str(payload.get("data_b64") or "")
+                if not data_b64:
+                    continue
+                client = await _relay_get_client_socket(stream_id)
+                if client is None:
+                    continue
+                try:
+                    await client.send_bytes(base64.b64decode(data_b64))
+                except Exception:
+                    await _relay_cleanup_stream(stream_id)
+                continue
+            if msg_type == "close":
+                client = await _relay_get_client_socket(stream_id)
+                await _relay_cleanup_stream(stream_id)
+                if client is not None:
+                    try:
+                        await client.close(code=1000)
+                    except Exception:
+                        pass
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+    finally:
+        await _relay_unregister_node_socket(normalized, websocket)
+
+
+@router.websocket("/relay/connect/{node_id}")
+async def relay_connect_socket(
+    websocket: WebSocket,
+    node_id: str,
+    token: str = Query(default=""),
+    target_host: str = Query(default=""),
+    target_port: int = Query(default=0),
+    tunnel_id: str = Query(default=""),
+) -> None:
+    normalized = _normalize_exit_node_label(node_id)
+    if not token:
+        await websocket.close(code=4401)
+        return
+    if not target_host or target_port <= 0 or target_port > 65535:
+        await websocket.close(code=4400)
+        return
+    if not _relay_node_connected(normalized):
+        await websocket.close(code=4404)
+        return
+
+    await websocket.accept()
+    stream_id = tunnel_id or secrets.token_urlsafe(12)
+    waiter = asyncio.get_running_loop().create_future()
+    await _relay_register_stream(stream_id, normalized, websocket, waiter)
+    try:
+        await _relay_send_to_node(normalized, {
+            "type": "open",
+            "stream_id": stream_id,
+            "host": target_host,
+            "port": int(target_port),
+        })
+        opened = await asyncio.wait_for(waiter, timeout=12)
+        if not isinstance(opened, dict) or str(opened.get("type") or "") != "open_ok":
+            error = "relay open failed"
+            if isinstance(opened, dict) and opened.get("error"):
+                error = str(opened.get("error"))
+            await websocket.send_text(json.dumps({"type": "error", "error": error}, ensure_ascii=False))
+            await websocket.close(code=1011)
+            return
+
+        await websocket.send_text(json.dumps({"type": "ready"}, ensure_ascii=False))
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if data is None:
+                continue
+            await _relay_send_to_node(normalized, {
+                "type": "data",
+                "stream_id": stream_id,
+                "data_b64": base64.b64encode(data).decode("ascii"),
+            })
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "error": str(exc)}, ensure_ascii=False))
+        except Exception:
+            pass
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+    finally:
+        try:
+            await _relay_send_to_node(normalized, {"type": "close", "stream_id": stream_id})
+        except Exception:
+            pass
+        await _relay_cleanup_stream(stream_id)
 
 
 @router.get("/exit-nodes", response_model=ExitNodeListOut)

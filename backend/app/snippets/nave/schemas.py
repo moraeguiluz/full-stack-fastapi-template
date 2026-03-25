@@ -181,6 +181,20 @@ class ExitNodeListOut(BaseModel):
     data: List[ExitNodeListItem]
 
 
+class ExitNodeConnectOut(BaseModel):
+    node_id: str
+    label: str
+    public_ip: Optional[str] = None
+    online: bool
+    last_seen_at: Optional[dt.datetime] = None
+    transport: str = "unknown"
+    wireguard: Optional[Any] = None
+    proxy_rule: str = ""
+    proxy: Optional[Any] = None
+    proxy_auth: Optional[Any] = None
+    relay: Optional[Any] = None
+
+
 class ProvisionIn(BaseModel):
     name: str = Field(..., min_length=3, max_length=63)
     profile_id: Optional[int] = None
