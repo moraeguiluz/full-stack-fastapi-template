@@ -4,6 +4,8 @@ set -euo pipefail
 
 FASTAPI_WORKERS="${FASTAPI_WORKERS:-4}"
 EMBED_VIDEO_WORKER="${EMBED_VIDEO_WORKER:-1}"
+APP_HOST="${APP_HOST:-0.0.0.0}"
+APP_PORT="${PORT:-${APP_PORT:-8000}}"
 
 pids=()
 
@@ -23,7 +25,7 @@ if [ "$EMBED_VIDEO_WORKER" = "1" ]; then
   pids+=("$!")
 fi
 
-fastapi run --workers "$FASTAPI_WORKERS" app/main.py &
+uvicorn app.main:app --host "$APP_HOST" --port "$APP_PORT" --workers "$FASTAPI_WORKERS" &
 pids+=("$!")
 
 wait -n "${pids[@]}"

@@ -1,0 +1,7 @@
+providers = ["..."]
+
+[phases.setup]
+nixPkgs = ["...", "ffmpeg", "bash"]
+
+[start]
+cmd = "bash scripts/start-with-video-worker.sh"
