@@ -134,6 +134,40 @@ services:
       # Enable redirection for HTTP and HTTPS
       - traefik.http.routers.${STACK_NAME?Variable not set}-backend-http.middlewares=https-redirect
 
+  video-worker:
+    image: '${DOCKER_IMAGE_BACKEND?Variable not set}:${TAG-latest}-video-worker'
+    restart: always
+    networks:
+      - default
+    depends_on:
+      db:
+        condition: service_healthy
+        restart: true
+      prestart:
+        condition: service_completed_successfully
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.video
+    env_file:
+      - .env
+    environment:
+      - DOMAIN=${DOMAIN}
+      - ENVIRONMENT=${ENVIRONMENT}
+      - SECRET_KEY=${SECRET_KEY?Variable not set}
+      - POSTGRES_SERVER=db
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER?Variable not set}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?Variable not set}
+      - VIDEO_WORKER_POLL_SECONDS=${VIDEO_WORKER_POLL_SECONDS:-5}
+      - VIDEO_WORKER_LEASE_SECONDS=${VIDEO_WORKER_LEASE_SECONDS:-900}
+      - VIDEO_WORKER_TMP_DIR=/var/lib/app-video
+      - VIDEO_HLS_SEGMENT_SECONDS=${VIDEO_HLS_SEGMENT_SECONDS:-4}
+      - VIDEO_FFMPEG_PRESET=${VIDEO_FFMPEG_PRESET:-veryfast}
+      - VIDEO_POSTER_AT_SECONDS=${VIDEO_POSTER_AT_SECONDS:-1}
+    volumes:
+      - video-workdir:/var/lib/app-video
+
   frontend:
     image: '${DOCKER_IMAGE_FRONTEND?Variable not set}:${TAG-latest}'
     restart: always
@@ -164,6 +198,7 @@ services:
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.middlewares=https-redirect
 volumes:
   app-db-data:
+  video-workdir:
 
 networks:
   traefik-public:
