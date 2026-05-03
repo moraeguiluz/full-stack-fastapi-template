@@ -13,7 +13,7 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import BigInteger, DateTime, Float, Integer, String, Text, create_engine, func, select
+from sqlalchemy import BigInteger, DateTime, Float, Integer, String, Text, and_, create_engine, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -278,9 +278,19 @@ def _lease_job() -> Optional[int]:
     db = get_db()
     try:
         with db.begin():
+            now = _now()
             stmt = (
                 select(VideoJob)
-                .where(VideoJob.kind == "transcode_hls", VideoJob.status == "pending")
+                .where(
+                    VideoJob.kind == "transcode_hls",
+                    or_(
+                        VideoJob.status == "pending",
+                        and_(
+                            VideoJob.status == "leased",
+                            or_(VideoJob.leased_until.is_(None), VideoJob.leased_until <= now),
+                        ),
+                    ),
+                )
                 .order_by(VideoJob.id.asc())
                 .with_for_update(skip_locked=True)
                 .limit(1)
@@ -288,6 +298,8 @@ def _lease_job() -> Optional[int]:
             job = db.execute(stmt).scalar_one_or_none()
             if job is None:
                 return None
+            if job.status == "leased":
+                log.warning("reclamando job expirado %s", job.id)
             job.status = "leased"
             job.worker_id = _WORKER_ID
             job.lease_token = secrets.token_hex(8)

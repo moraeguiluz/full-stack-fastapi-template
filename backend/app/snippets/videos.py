@@ -27,6 +27,7 @@ from sqlalchemy import (
     and_,
     create_engine,
     func,
+    or_,
     select,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -351,6 +352,7 @@ def _get_video_by_public_id(db: Session, public_id: str) -> Video:
 
 
 def _ensure_job(db: Session, video: Video) -> None:
+    now = _now()
     existing = db.execute(
         select(VideoJob).where(
             VideoJob.video_id == video.id,
@@ -359,6 +361,15 @@ def _ensure_job(db: Session, video: Video) -> None:
         )
     ).scalar_one_or_none()
     if existing is not None:
+        if existing.status == "leased" and (
+            existing.leased_until is None or existing.leased_until <= now
+        ):
+            existing.status = "pending"
+            existing.worker_id = None
+            existing.lease_token = None
+            existing.leased_until = None
+            existing.error_text = "Lease expirado; job reencolado."
+            return
         return
     db.add(
         VideoJob(
