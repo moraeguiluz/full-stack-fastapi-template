@@ -10,6 +10,8 @@ from typing import Dict, Optional
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
+import requests
+
 
 @dataclass(frozen=True)
 class StorageConfig:
@@ -180,18 +182,19 @@ def upload_text(object_name: str, text: str, *, content_type: str = "application
 def download_to_file(object_name: str, target_path: Path) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     url = presign_download_url(object_name, expires_seconds=900)
-    with urlopen(url) as resp, target_path.open("wb") as fh:
-        while True:
-            chunk = resp.read(1024 * 1024)
-            if not chunk:
-                break
-            fh.write(chunk)
+    with requests.get(url, stream=True, timeout=300) as resp:
+        resp.raise_for_status()
+        with target_path.open("wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    fh.write(chunk)
 
 
 def download_text(object_name: str) -> str:
     url = presign_download_url(object_name, expires_seconds=300)
-    with urlopen(url) as resp:
-        return resp.read().decode("utf-8")
+    resp = requests.get(url, timeout=60)
+    resp.raise_for_status()
+    return resp.text
 
 
 def content_type_for_path(path: Path) -> str:
